@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Polymarket Momentum Bot — Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="config.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Polymarket Momentum Bot</h1>
+    <div class="chips">
+      <span id="dry-run-chip" class="chip">dry_run: ?</span>
+      <span id="kill-chip" class="chip">kill_switch: ?</span>
+      <span id="heartbeat-chip" class="chip">heartbeat: ?</span>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Controls</h2>
+      <div class="controls">
+        <button id="toggle-kill" class="danger">Toggle kill switch</button>
+        <button id="toggle-dry">Toggle dry_run</button>
+        <button id="refresh">Refresh</button>
+      </div>
+      <details>
+        <summary>Edit overridable config (JSON)</summary>
+        <textarea id="config-json" rows="10" spellcheck="false"></textarea>
+        <button id="save-config">Save config</button>
+        <p class="muted">
+          Only these keys are accepted:
+          <code>dry_run, kill_switch, ma_window, price_interval, price_fidelity,
+          max_trade_size_usdc, max_daily_spend_usdc, max_open_positions,
+          min_volume_usdc, min_liquidity_usdc, max_spread, trade_cooldown_sec,
+          category_allowlist, market_allowlist, poll_interval_sec, max_markets,
+          log_level</code>.
+        </p>
+      </details>
+    </section>
+
+    <section>
+      <h2>Positions</h2>
+      <table id="positions-table">
+        <thead><tr><th>Token</th><th>Size</th><th>Avg price</th><th>Updated</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Recent signals</h2>
+      <table id="signals-table">
+        <thead><tr><th>Time</th><th>Market</th><th>Signal</th><th>Last</th><th>MA</th><th>Reason</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Recent orders</h2>
+      <table id="orders-table">
+        <thead><tr><th>Time</th><th>Side</th><th>Token</th><th>Size</th><th>Price</th><th>Dry</th><th>OK</th><th>Error</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Recent errors</h2>
+      <ul id="errors-list"></ul>
+    </section>
+  </main>
+
+  <footer>
+    <small>
+      Educational software. Not financial advice. Never paste your private key
+      here — wallet credentials live only in Secrets Manager.
+    </small>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

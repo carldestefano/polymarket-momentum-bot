@@ -36,8 +36,13 @@ intentionally compact so you can read the whole thing top to bottom.
 │   ├── risk.py            # limits + position book
 │   ├── trader.py          # py-clob-client-v2 wrapper with dry-run
 │   ├── logging_setup.py   # console + rotating file logs
-│   └── main.py            # run loop (--once for a single scan)
+│   ├── main.py            # run loop (--once for a single scan)
+│   └── aws/               # optional AWS adapters (Secrets, DynamoDB, CloudWatch)
 ├── tests/                 # pytest unit tests (offline)
+├── Dockerfile             # container image for ECS Fargate
+├── infra/cdk/             # CDK v2 (Python) — ECR, ECS, DDB, Secrets, Lambda API
+├── infra/gui/             # static dashboard (HTML/CSS/JS)
+├── docs/AWS_DEPLOYMENT.md # step-by-step AWS deploy guide
 ├── requirements.txt
 ├── pyproject.toml
 ├── .env.example
@@ -66,6 +71,16 @@ python -m polymarket_momentum_bot.main --once
 # 5. Run forever (still dry-run unless you changed DRY_RUN=false)
 python -m polymarket_momentum_bot.main
 ```
+
+## Deploy on AWS
+
+See [`docs/AWS_DEPLOYMENT.md`](docs/AWS_DEPLOYMENT.md) for a step-by-step
+guide covering CDK bootstrap, Docker image push, secret population, and the
+web dashboard URL. The AWS stack runs the bot as a scheduled Fargate task,
+persists signals/orders/positions in DynamoDB, and exposes a minimal
+CloudFront-hosted GUI for status and kill-switch control. The local CLI
+workflow above continues to work unchanged — AWS adapters are optional and
+only activate when their env vars are set.
 
 ## Wallet, funder, and signature types
 

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket-momentum-bot"
+version = "0.1.0"
+description = "Beginner-friendly Polymarket CLOB momentum trading bot (educational)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Polymarket Momentum Bot Contributors" }]
+dependencies = [
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+live = ["py-clob-client-v2>=0.1.0"]
+test = ["pytest>=7.4"]
+
+[project.scripts]
+polymarket-momentum-bot = "polymarket_momentum_bot.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -116,3 +116,38 @@ footer {
   overflow-y: auto;
 }
 #errors-list li { color: var(--danger); margin-bottom: 0.25rem; }
+
+.auth-box {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.auth-user {
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+}
+
+.locked {
+  min-height: 60vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+.locked-inner {
+  max-width: 480px;
+  background: var(--panel);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 2rem;
+  text-align: center;
+}
+.locked-inner h2 { color: var(--accent); margin-top: 0; }
+.locked-inner p { color: var(--muted); }
+.locked-inner button {
+  margin-top: 1rem;
+  padding: 0.6rem 1.2rem;
+  font-size: 1rem;
+}
+.error { color: var(--danger); font-size: 0.85rem; }

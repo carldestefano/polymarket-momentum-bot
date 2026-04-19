@@ -13,6 +13,9 @@ every command below — nothing in this repo talks to AWS directly.
 >   git commit. The wallet secret is populated manually via the AWS CLI.
 > - Use an IAM user (or SSO role) with MFA enabled. Do not use the AWS
 >   account root.
+> - The dashboard uses a **separate Cognito user pool** for login. Never
+>   paste your AWS root or IAM console credentials into the dashboard
+>   login screen - create a dedicated Cognito user (see step 10).
 > - Prediction markets may be restricted in your jurisdiction. You are
 >   responsible for compliance with Polymarket's terms and local law.
 > - This is educational software, not financial advice.
@@ -227,7 +230,51 @@ LOG_GROUP=$(aws cloudformation describe-stacks \
 aws logs tail "$LOG_GROUP" --follow
 ```
 
-## 10. Open the dashboard
+## 10. Create a dashboard user (Cognito)
+
+The dashboard and its HTTP API are protected by an **Amazon Cognito user
+pool** that lives in your AWS account. This is **not** the AWS root or IAM
+console login, and you should **never** paste your AWS root credentials
+into the dashboard login screen. Create a Cognito user specifically for
+the dashboard:
+
+```bash
+USER_POOL_ID=$(aws cloudformation describe-stacks \
+  --stack-name PolymarketMomentumBot \
+  --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
+  --output text)
+
+# Replace with the email you want to sign in with.
+EMAIL="you@example.com"
+TEMP_PASSWORD='ChangeMe123!Now'   # must meet the pool's password policy
+
+aws cognito-idp admin-create-user \
+  --user-pool-id "$USER_POOL_ID" \
+  --username "$EMAIL" \
+  --user-attributes Name=email,Value="$EMAIL" Name=email_verified,Value=true \
+  --temporary-password "$TEMP_PASSWORD" \
+  --message-action SUPPRESS
+```
+
+`--message-action SUPPRESS` stops Cognito from emailing the temporary
+password (useful if your account is still in SES sandbox). If you want
+Cognito to send the email, drop that flag.
+
+If you prefer to set a permanent password straight away (skip the "force
+change on first login" step):
+
+```bash
+aws cognito-idp admin-set-user-password \
+  --user-pool-id "$USER_POOL_ID" \
+  --username "$EMAIL" \
+  --password 'YourRealStrongPassword123!' \
+  --permanent
+```
+
+Password policy (set by the CDK stack): min length 12, upper + lower +
+digit + symbol required.
+
+## 11. Open the dashboard
 
 ```bash
 aws cloudformation describe-stacks \
@@ -236,7 +283,15 @@ aws cloudformation describe-stacks \
   --output text
 ```
 
-Open the URL. You should see heartbeat, recent signals, and recent orders.
+Open the URL. You will see a **Sign in required** screen. Click
+**Log in with Cognito**, enter the email/password you set above, and
+(if this is the temporary password) set a new permanent password when
+Cognito prompts.
+
+After login, the dashboard shows heartbeat, recent signals, and recent
+orders. Every API request sends your Cognito id token as a
+`Authorization: Bearer ...` header; the HTTP API's JWT authorizer
+rejects any unauthenticated call with HTTP 401.
 
 ### Change kill-switch / dry-run via the dashboard
 
@@ -244,29 +299,44 @@ The dashboard has buttons for both. They write to the `ConfigTable`; the bot
 reads that table at the start of every scan, so changes take effect on the
 next cadence tick.
 
-## 11. Tear everything down
+## 12. Tear everything down
 
 ```bash
 cd infra/cdk
 cdk destroy
 ```
 
-Tables and the wallet secret are retained on stack deletion by default
-(so you cannot accidentally lose state). Delete them manually in the console
-if you want a truly clean slate.
+Tables, the wallet secret, and the Cognito user pool are retained on stack
+deletion by default (so you cannot accidentally lose state or locked-out
+users). Delete them manually in the console if you want a truly clean slate.
 
 ## GUI authentication
 
-The default dashboard is **open to the public internet**. For a real
-deployment, front the CloudFront distribution with one of:
+The dashboard is protected by **Amazon Cognito** in your own AWS account:
 
-- Cognito Hosted UI + Lambda@Edge (most flexible)
-- AWS WAF IP allowlist (simplest, lowest-friction)
-- A CloudFront signed-cookie gate
+- A **Cognito User Pool** holds dashboard users (email sign-in, 12-char
+  password policy, optional TOTP MFA, self sign-up disabled).
+- A **Cognito Hosted UI domain** is served at
+  `https://<prefix>.auth.<region>.amazoncognito.com` and handles
+  login/logout. You can override the prefix with
+  `cdk deploy -c cognito_domain_prefix=my-unique-prefix`.
+- A public **User Pool Client** (no client secret) does the
+  Authorization Code + PKCE flow in the browser.
+- The HTTP API has a **JWT authorizer** tied to the pool and client, so
+  every `/status`, `/config`, `/signals`, `/orders`, `/kill-switch` call
+  requires a valid Cognito id token in `Authorization: Bearer ...`.
+- CORS on the HTTP API is locked to the CloudFront dashboard origin only.
 
-Each of these is a paragraph of code in the stack — intentionally left out of
-the default to keep the first-time deploy simple. **Do not** expose live
-trading controls without auth.
+This is **not** AWS root/IAM login. Never use your AWS root credentials
+to sign in to the dashboard. Create a dedicated Cognito user as shown in
+step 10. The user pool lives entirely inside your AWS account; no third
+party has access to it.
+
+### Logging out
+
+Click **Log out** in the dashboard header. The browser's in-memory tokens
+and `sessionStorage` entries are cleared, and Cognito's `/logout` endpoint
+is called to end the hosted-UI session.
 
 ## Cost notes (qualitative)
 
@@ -296,6 +366,32 @@ trigger a one-off run (step 8). Log lines go to CloudWatch Logs (step 9).
 
 **`cdk bootstrap` fails with an account mismatch:**
 double-check `AWS_PROFILE` and `aws sts get-caller-identity`.
+
+**Cognito login redirects to `redirect_mismatch`:**
+the CloudFront `DashboardUrl` must exactly match one of the app client's
+callback URLs. If you customised the CloudFront distribution or added a
+custom domain, redeploy the CDK stack so the new URL is registered on the
+Cognito app client, or add it manually in the Cognito console under
+*App client -> Hosted UI -> Allowed callback URLs*. The same applies to
+the logout URL.
+
+**Login seems stuck / "session expired" in a loop:**
+open DevTools, clear the site's `sessionStorage` (keys starting with
+`pbm_`) and reload. If the token exchange itself fails (network tab shows
+400 from `/oauth2/token`), the PKCE verifier was lost - that usually
+means a second tab initiated its own login and overwrote the verifier.
+Close other tabs and retry.
+
+**API calls return HTTP 401:**
+the id token is missing, expired, or wrong audience. Log out, clear
+`sessionStorage`, and log in again. If it persists, confirm the
+`UserPoolId` and `UserPoolClientId` in the CloudFormation outputs match
+what's injected into `config.js` (view-source on the dashboard).
+
+**Cognito domain prefix collision on first deploy:**
+the default prefix is `polybot-<account>-<region>`. If it collides with
+another pool in the same region, override it:
+`cdk deploy -c cognito_domain_prefix=polybot-myname-abc123`.
 
 ## File map
 

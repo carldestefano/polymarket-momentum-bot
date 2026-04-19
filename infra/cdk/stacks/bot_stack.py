@@ -29,9 +29,11 @@ from aws_cdk import (
     Stack,
 )
 from aws_cdk import aws_apigatewayv2 as apigwv2
+from aws_cdk import aws_apigatewayv2_authorizers as apigw_authorizers
 from aws_cdk import aws_apigatewayv2_integrations as apigw_integrations
 from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
+from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as ddb
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
@@ -242,6 +244,107 @@ class BotStack(Stack):
             )
         )
 
+        # --- S3 + CloudFront static site -------------------------------------
+        # Built before the API so the dashboard domain is known and can be
+        # registered as an allowed Cognito callback/logout URL and as the
+        # single CORS origin on the HTTP API.
+        site_bucket = s3.Bucket(
+            self,
+            "GuiBucket",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+        distribution = cloudfront.Distribution(
+            self,
+            "GuiDistribution",
+            default_root_object="index.html",
+            default_behavior=cloudfront.BehaviorOptions(
+                origin=origins.S3BucketOrigin.with_origin_access_control(site_bucket),
+                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            ),
+            error_responses=[
+                cloudfront.ErrorResponse(
+                    http_status=404,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                )
+            ],
+        )
+        dashboard_url = f"https://{distribution.distribution_domain_name}"
+
+        # --- Cognito User Pool for dashboard login ---------------------------
+        # Dashboard users are managed as Cognito users in the deploying
+        # AWS account. This is NOT AWS IAM/root login - it is a separate
+        # Cognito user directory intentionally distinct from the cloud
+        # administrator identity.
+        user_pool = cognito.UserPool(
+            self,
+            "DashboardUserPool",
+            self_sign_up_enabled=False,
+            sign_in_aliases=cognito.SignInAliases(email=True, username=False),
+            sign_in_case_sensitive=False,
+            auto_verify=cognito.AutoVerifiedAttrs(email=True),
+            standard_attributes=cognito.StandardAttributes(
+                email=cognito.StandardAttribute(required=True, mutable=True),
+            ),
+            password_policy=cognito.PasswordPolicy(
+                min_length=12,
+                require_lowercase=True,
+                require_uppercase=True,
+                require_digits=True,
+                require_symbols=True,
+            ),
+            account_recovery=cognito.AccountRecovery.EMAIL_ONLY,
+            mfa=cognito.Mfa.OPTIONAL,
+            mfa_second_factor=cognito.MfaSecondFactor(sms=False, otp=True),
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+
+        # App client for the browser SPA. No client secret (public client).
+        # Callback/logout URLs point at the CloudFront distribution root.
+        user_pool_client = user_pool.add_client(
+            "DashboardClient",
+            generate_secret=False,
+            auth_flows=cognito.AuthFlow(user_srp=True, user_password=False),
+            o_auth=cognito.OAuthSettings(
+                flows=cognito.OAuthFlows(authorization_code_grant=True),
+                scopes=[
+                    cognito.OAuthScope.OPENID,
+                    cognito.OAuthScope.EMAIL,
+                    cognito.OAuthScope.PROFILE,
+                ],
+                callback_urls=[dashboard_url, f"{dashboard_url}/"],
+                logout_urls=[dashboard_url, f"{dashboard_url}/"],
+            ),
+            prevent_user_existence_errors=True,
+            access_token_validity=Duration.hours(1),
+            id_token_validity=Duration.hours(1),
+            refresh_token_validity=Duration.days(30),
+        )
+
+        # Cognito Hosted UI domain. Prefix must be globally unique within
+        # the region, so we derive it from the stack/account/region. Users
+        # can override via CDK context "cognito_domain_prefix".
+        domain_prefix = self.node.try_get_context("cognito_domain_prefix") or (
+            f"polybot-{self.account}-{self.region}"
+        )
+        user_pool_domain = user_pool.add_domain(
+            "DashboardUserPoolDomain",
+            cognito_domain=cognito.CognitoDomainOptions(domain_prefix=domain_prefix),
+        )
+        hosted_ui_base = (
+            f"https://{domain_prefix}.auth.{self.region}.amazoncognito.com"
+        )
+        hosted_ui_login_url = (
+            f"{hosted_ui_base}/login"
+            f"?client_id={user_pool_client.user_pool_client_id}"
+            f"&response_type=code"
+            f"&scope=openid+email+profile"
+            f"&redirect_uri={dashboard_url}"
+        )
+
         # --- API Lambda + HTTP API -------------------------------------------
         api_role = iam.Role(
             self,
@@ -279,13 +382,37 @@ class BotStack(Stack):
         http_api = apigwv2.HttpApi(
             self,
             "BotHttpApi",
-            description="Polymarket momentum bot GUI API.",
+            description="Polymarket momentum bot GUI API (JWT-protected).",
             cors_preflight=apigwv2.CorsPreflightOptions(
-                allow_headers=["*"],
-                allow_methods=[apigwv2.CorsHttpMethod.ANY],
-                allow_origins=["*"],
+                allow_headers=[
+                    "authorization",
+                    "content-type",
+                    "x-amz-date",
+                    "x-amz-security-token",
+                    "x-api-key",
+                ],
+                allow_methods=[
+                    apigwv2.CorsHttpMethod.GET,
+                    apigwv2.CorsHttpMethod.POST,
+                    apigwv2.CorsHttpMethod.PUT,
+                    apigwv2.CorsHttpMethod.OPTIONS,
+                ],
+                allow_origins=[dashboard_url],
+                allow_credentials=False,
+                max_age=Duration.hours(1),
             ),
         )
+
+        # JWT authorizer validates Cognito-issued tokens on every request.
+        jwt_authorizer = apigw_authorizers.HttpJwtAuthorizer(
+            "CognitoJwtAuthorizer",
+            jwt_issuer=(
+                f"https://cognito-idp.{self.region}.amazonaws.com/"
+                f"{user_pool.user_pool_id}"
+            ),
+            jwt_audience=[user_pool_client.user_pool_client_id],
+        )
+
         integration = apigw_integrations.HttpLambdaIntegration(
             "ApiIntegration", api_fn
         )
@@ -294,44 +421,29 @@ class BotStack(Stack):
                 path=path,
                 methods=[apigwv2.HttpMethod.ANY],
                 integration=integration,
+                authorizer=jwt_authorizer,
             )
 
-        # --- S3 + CloudFront static site -------------------------------------
-        site_bucket = s3.Bucket(
-            self,
-            "GuiBucket",
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
+        # Deploy static frontend and inject runtime config (API URL +
+        # Cognito client details) via a generated config.js file.
+        config_js = (
+            "window.BOT_CONFIG = {\n"
+            f"  apiUrl: '{http_api.api_endpoint}',\n"
+            f"  region: '{self.region}',\n"
+            f"  userPoolId: '{user_pool.user_pool_id}',\n"
+            f"  userPoolClientId: '{user_pool_client.user_pool_client_id}',\n"
+            f"  cognitoDomain: '{hosted_ui_base}',\n"
+            f"  redirectUri: '{dashboard_url}',\n"
+            f"  logoutUri: '{dashboard_url}'\n"
+            "};\n"
+            "window.BOT_API_URL = window.BOT_CONFIG.apiUrl;\n"
         )
-        distribution = cloudfront.Distribution(
-            self,
-            "GuiDistribution",
-            default_root_object="index.html",
-            default_behavior=cloudfront.BehaviorOptions(
-                origin=origins.S3BucketOrigin.with_origin_access_control(site_bucket),
-                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-            ),
-            error_responses=[
-                cloudfront.ErrorResponse(
-                    http_status=404,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                )
-            ],
-        )
-
-        # Deploy static frontend and inject the API URL via a config.js file.
         s3deploy.BucketDeployment(
             self,
             "GuiDeployment",
             sources=[
                 s3deploy.Source.asset(str(FRONTEND_DIR)),
-                s3deploy.Source.data(
-                    "config.js",
-                    f"window.BOT_API_URL = '{http_api.api_endpoint}';",
-                ),
+                s3deploy.Source.data("config.js", config_js),
             ],
             destination_bucket=site_bucket,
             distribution=distribution,
@@ -351,8 +463,9 @@ class BotStack(Stack):
         CfnOutput(self, "WalletSecretArn", value=wallet_secret.secret_arn)
         CfnOutput(self, "LogGroupName", value=log_group.log_group_name)
         CfnOutput(self, "ApiEndpoint", value=http_api.api_endpoint)
-        CfnOutput(
-            self,
-            "DashboardUrl",
-            value=f"https://{distribution.distribution_domain_name}",
-        )
+        CfnOutput(self, "ApiUrl", value=http_api.api_endpoint)
+        CfnOutput(self, "DashboardUrl", value=dashboard_url)
+        CfnOutput(self, "UserPoolId", value=user_pool.user_pool_id)
+        CfnOutput(self, "UserPoolClientId", value=user_pool_client.user_pool_client_id)
+        CfnOutput(self, "CognitoDomain", value=hosted_ui_base)
+        CfnOutput(self, "HostedUiLoginUrl", value=hosted_ui_login_url)

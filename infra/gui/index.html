@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Polymarket Momentum Bot — Dashboard</title>
+  <title>Polymarket Momentum Bot &mdash; Dashboard</title>
   <link rel="stylesheet" href="style.css" />
   <script src="config.js"></script>
 </head>
@@ -15,9 +15,31 @@
       <span id="kill-chip" class="chip">kill_switch: ?</span>
       <span id="heartbeat-chip" class="chip">heartbeat: ?</span>
     </div>
+    <div class="auth-box">
+      <span id="auth-user" class="chip auth-user" hidden></span>
+      <button id="login-btn" hidden>Log in</button>
+      <button id="logout-btn" class="danger" hidden>Log out</button>
+    </div>
   </header>
 
-  <main>
+  <div id="locked-screen" class="locked" hidden>
+    <div class="locked-inner">
+      <h2>Sign in required</h2>
+      <p>
+        This dashboard is protected by Amazon Cognito. Log in with the
+        dashboard user created in your AWS account to continue.
+      </p>
+      <p class="muted">
+        This is <strong>not</strong> your AWS root or IAM console login.
+        It is a Cognito user that the AWS account owner created specifically
+        for this dashboard.
+      </p>
+      <button id="locked-login-btn">Log in with Cognito</button>
+      <p id="locked-error" class="error" hidden></p>
+    </div>
+  </div>
+
+  <main id="app-main" hidden>
     <section>
       <h2>Controls</h2>
       <div class="controls">
@@ -73,7 +95,7 @@
   <footer>
     <small>
       Educational software. Not financial advice. Never paste your private key
-      here — wallet credentials live only in Secrets Manager.
+      here &mdash; wallet credentials live only in Secrets Manager.
     </small>
   </footer>
 

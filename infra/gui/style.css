@@ -11,6 +11,11 @@
 
 * { box-sizing: border-box; }
 
+/* The HTML `hidden` attribute must always win over element-specific
+   `display` rules (e.g. `.locked { display: flex }`), otherwise toggling
+   `el.hidden = true` from JS leaves the element visible. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;

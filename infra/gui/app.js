@@ -198,6 +198,9 @@
     $("app-main").hidden = false;
     $("login-btn").hidden = true;
     $("logout-btn").hidden = false;
+    const errEl = $("locked-error");
+    errEl.textContent = "";
+    errEl.hidden = true;
     const email =
       extractEmail(idToken) || sessionStorage.getItem(STORAGE.USER_EMAIL) || "";
     const userEl = $("auth-user");

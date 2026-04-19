@@ -168,7 +168,7 @@ class BotStack(Stack):
             self,
             "BotTaskRole",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
-            description="Polymarket bot task role — reads wallet secret, writes DDB/logs/metrics.",
+            description="Polymarket bot task role - reads wallet secret, writes DDB/logs/metrics.",
         )
         wallet_secret.grant_read(task_role)
         for table in (config_table, state_table, signals_table, orders_table):

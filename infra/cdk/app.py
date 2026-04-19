@@ -20,7 +20,7 @@ BotStack(
     app,
     "PolymarketMomentumBot",
     env=env,
-    description="Polymarket CLOB momentum bot — ECS Fargate + DynamoDB + GUI.",
+    description="Polymarket CLOB momentum bot - ECS Fargate + DynamoDB + GUI.",
 )
 
 app.synth()

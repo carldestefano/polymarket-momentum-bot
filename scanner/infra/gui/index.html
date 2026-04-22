@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Polymarket BTC Scanner</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="config.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Polymarket BTC Scanner</h1>
+    <div class="chips">
+      <span id="btc-price-chip" class="chip">BTC: ?</span>
+      <span id="scan-time-chip" class="chip">last scan: ?</span>
+      <span id="btc-count-chip" class="chip">BTC markets: ?</span>
+    </div>
+    <div class="auth-box">
+      <span id="auth-user" class="chip auth-user" hidden></span>
+      <button id="logout-btn" class="danger" hidden>Log out</button>
+    </div>
+  </header>
+
+  <div id="locked-screen" class="locked" hidden>
+    <div class="locked-inner">
+      <h2>Sign in required</h2>
+      <p>
+        This dashboard is protected by Amazon Cognito. Log in with the
+        dashboard user created in your AWS account to continue.
+      </p>
+      <p class="muted">
+        This is <strong>not</strong> your AWS root or IAM console login.
+        It is a Cognito user that the AWS account owner created
+        specifically for this dashboard.
+      </p>
+      <button id="locked-login-btn">Log in with Cognito</button>
+      <p id="locked-error" class="error" hidden></p>
+    </div>
+  </div>
+
+  <main id="app-main" hidden>
+    <section>
+      <h2>Controls</h2>
+      <div class="controls">
+        <button id="refresh">Refresh</button>
+        <button id="trigger-scan">Trigger scan now</button>
+        <label class="inline">
+          Min liquidity ($):
+          <input id="filter-liq" type="number" min="0" step="100" value="0" />
+        </label>
+        <label class="inline">
+          Max resolution days:
+          <input id="filter-days" type="number" min="0" step="1" placeholder="any" />
+        </label>
+        <label class="inline">
+          Short horizon only:
+          <input id="filter-short" type="checkbox" />
+        </label>
+      </div>
+      <p id="api-error" class="error" hidden></p>
+    </section>
+
+    <section>
+      <h2>Ranked opportunities</h2>
+      <div class="table-wrap">
+        <table id="opps-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Market</th>
+              <th title="Extracted price threshold">Threshold</th>
+              <th title="Best bid">Bid</th>
+              <th title="Best ask">Ask</th>
+              <th title="(bid+ask)/2">Mid</th>
+              <th title="ask-bid">Spread</th>
+              <th title="Last trade price">Last</th>
+              <th title="Fair-value placeholder">FV</th>
+              <th title="FV - mid">Edge</th>
+              <th title="USD volume">Vol</th>
+              <th title="USD liquidity">Liq</th>
+              <th title="Time to resolution">Resolves in</th>
+              <th title="Scanner score">Score</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="opps-empty" class="muted" hidden>
+        No opportunities yet. Wait for the scheduled scan to run, or click
+        "Trigger scan now" above.
+      </p>
+    </section>
+
+    <section>
+      <h2>Recent scans</h2>
+      <div class="table-wrap">
+        <table id="scans-table">
+          <thead>
+            <tr>
+              <th>Scanned at</th>
+              <th>BTC price</th>
+              <th>Total markets</th>
+              <th>BTC markets</th>
+              <th>Top N</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <p class="muted">
+        Stage 1 scanner only. No wallet, no private keys, no order
+        placement. This is not financial advice.
+      </p>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

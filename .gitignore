@@ -46,3 +46,10 @@ infra/cdk/cdk.out/
 infra/cdk/.venv/
 infra/cdk/node_modules/
 cdk.context.json
+
+# Scanner CDK
+scanner/infra/cdk/cdk.out/
+scanner/infra/cdk/.venv/
+scanner/infra/cdk/node_modules/
+# Staged scanner package copied into the scanner Lambda asset at synth time.
+scanner/infra/cdk/lambda/scanner/polymarket_scanner/

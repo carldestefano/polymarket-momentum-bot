@@ -1,5 +1,20 @@
 # Polymarket Momentum Bot
 
+This repository now contains **two** independent Polymarket apps:
+
+1. **`scanner/` — Stage 1 BTC scanner (read-only).** A brand-new,
+   scanner-only pipeline that pulls BTC prediction markets from
+   Polymarket's public Gamma API, classifies and ranks them, and
+   surfaces the results through a Cognito-protected static dashboard.
+   **No wallet, no private keys, no order placement, no trading.**
+   See [`scanner/README.md`](scanner/README.md) and
+   [`scanner/docs/AWS_DEPLOYMENT.md`](scanner/docs/AWS_DEPLOYMENT.md).
+
+2. **(Legacy) Momentum bot** — the original 20-period MA momentum
+   trading bot described below. Still present in `src/`, `infra/cdk/`,
+   `infra/gui/`, etc. If you are looking for the scanner, skip to
+   `scanner/`.
+
 A small, beginner-friendly Python project that trades Polymarket CLOB markets
 using a simple **20-period moving-average momentum** strategy. It is
 intentionally compact so you can read the whole thing top to bottom.

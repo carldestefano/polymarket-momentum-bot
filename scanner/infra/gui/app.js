@@ -5,6 +5,29 @@
   const API = (CFG.apiUrl || window.SCANNER_API_URL || "").replace(/\/+$/, "");
   const $ = (id) => document.getElementById(id);
 
+  function apiUrl(path) {
+    const p = path.startsWith("/") ? path : "/" + path;
+    return API + p;
+  }
+
+  function describeFetchError(err, url) {
+    // A TypeError with no status is almost always a CORS preflight
+    // failure, DNS/connection error, or mixed-content block. Surface the
+    // URL so the operator can see which host is unreachable.
+    const msg = err && err.message ? err.message : String(err);
+    if (err instanceof TypeError) {
+      return (
+        "Network/CORS error reaching " +
+        (url || "API") +
+        " (" +
+        msg +
+        "). Check that the API CORS config allows this origin and " +
+        "that the API URL in config.js is correct."
+      );
+    }
+    return msg;
+  }
+
   const STORAGE = {
     ID_TOKEN: "pbs_id_token",
     ACCESS_TOKEN: "pbs_access_token",
@@ -143,31 +166,51 @@
 
   // --- API ----------------------------------------------------------------
   async function apiGet(path) {
-    const resp = await fetch(API + path, {
-      headers: { authorization: "Bearer " + idToken },
-    });
+    const url = apiUrl(path);
+    let resp;
+    try {
+      resp = await fetch(url, {
+        headers: { authorization: "Bearer " + idToken },
+      });
+    } catch (e) {
+      console.error("apiGet fetch failed", { url, error: e });
+      throw new Error(describeFetchError(e, url));
+    }
     if (resp.status === 401) {
       clearAuth();
       renderAuth();
       throw new Error("unauthorized");
+    }
+    if (resp.status === 403) {
+      throw new Error("API " + path + " -> 403 forbidden (token rejected)");
     }
     if (!resp.ok) throw new Error("API " + path + " -> " + resp.status);
     return resp.json();
   }
 
   async function apiPost(path, body) {
-    const resp = await fetch(API + path, {
-      method: "POST",
-      headers: {
-        authorization: "Bearer " + idToken,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body || {}),
-    });
+    const url = apiUrl(path);
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer " + idToken,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body || {}),
+      });
+    } catch (e) {
+      console.error("apiPost fetch failed", { url, error: e });
+      throw new Error(describeFetchError(e, url));
+    }
     if (resp.status === 401) {
       clearAuth();
       renderAuth();
       throw new Error("unauthorized");
+    }
+    if (resp.status === 403) {
+      throw new Error("API " + path + " -> 403 forbidden (token rejected)");
     }
     if (!resp.ok) throw new Error("API " + path + " -> " + resp.status);
     return resp.json();
@@ -303,6 +346,20 @@
 
   async function refresh() {
     setApiError("");
+    if (!API) {
+      setApiError(
+        "API URL is not configured. Redeploy the CDK stack so " +
+          "config.js picks up the ApiUrl output.",
+      );
+      return;
+    }
+    if (!/^https:\/\//i.test(API)) {
+      setApiError(
+        "API URL must be absolute HTTPS, got: " + API + ". " +
+          "Check config.js.",
+      );
+      return;
+    }
     try {
       const [status, opps, scans] = await Promise.all([
         apiGet("/status"),

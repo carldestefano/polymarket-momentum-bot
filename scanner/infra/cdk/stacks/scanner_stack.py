@@ -276,6 +276,17 @@ class PolymarketScannerStack(Stack):
             },
         )
 
+        # CORS: the CloudFront distribution domain is only known at deploy
+        # time via a CFN token, and API Gateway HTTP API's allowOrigins does
+        # not accept unresolved tokens — passing one produces a literal
+        # "${Token[...]}" in the template and every browser preflight fails
+        # with "NetworkError when attempting to fetch resource."
+        #
+        # Since we never send cookies (the dashboard uses bearer tokens in
+        # the Authorization header and allow_credentials=False), "*" is the
+        # pragmatic and safe choice: the CloudFront origin is unknown at
+        # synth time, the API is JWT-protected on every route except the
+        # CORS preflight, and no cross-origin credentials are exposed.
         http_api = apigwv2.HttpApi(
             self,
             "ScannerHttpApi",
@@ -294,7 +305,7 @@ class PolymarketScannerStack(Stack):
                     apigwv2.CorsHttpMethod.PUT,
                     apigwv2.CorsHttpMethod.OPTIONS,
                 ],
-                allow_origins=[dashboard_url],
+                allow_origins=["*"],
                 allow_credentials=False,
                 max_age=Duration.hours(1),
             ),
@@ -312,27 +323,42 @@ class PolymarketScannerStack(Stack):
         integration = apigw_integrations.HttpLambdaIntegration(
             "ApiIntegration", api_fn
         )
+        # Use explicit methods (GET/POST) rather than ANY so the JWT
+        # authorizer never sees an OPTIONS preflight. HTTP API normally
+        # handles OPTIONS at the gateway layer when cors_preflight is set,
+        # but enumerating methods keeps the contract clear and prevents
+        # future regressions where an authorizer could block preflight.
+        api_methods = [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]
         for path in ("/status", "/config", "/opportunities", "/scans", "/scan"):
             http_api.add_routes(
                 path=path,
-                methods=[apigwv2.HttpMethod.ANY],
+                methods=api_methods,
                 integration=integration,
                 authorizer=jwt_authorizer,
             )
 
         # --- Dashboard deployment with injected runtime config ---------------
+        # Normalize apiUrl at runtime (strip trailing slashes) so that
+        # fetch(API + "/status") never produces "//status". All URLs must
+        # be absolute HTTPS — http_api.api_endpoint returns the fully
+        # qualified "https://<id>.execute-api.<region>.amazonaws.com".
         config_js = (
-            "window.SCANNER_CONFIG = {\n"
-            f"  apiUrl: '{http_api.api_endpoint}',\n"
-            f"  region: '{self.region}',\n"
-            f"  userPoolId: '{user_pool.user_pool_id}',\n"
-            f"  userPoolClientId: '{user_pool_client.user_pool_client_id}',\n"
-            f"  cognitoDomain: '{hosted_ui_base}',\n"
-            f"  redirectUri: '{dashboard_url}',\n"
-            f"  logoutUri: '{dashboard_url}',\n"
-            f"  scannerId: '{scanner_id}'\n"
-            "};\n"
-            "window.SCANNER_API_URL = window.SCANNER_CONFIG.apiUrl;\n"
+            "(function(){\n"
+            "  var cfg = {\n"
+            f"    apiUrl: '{http_api.api_endpoint}',\n"
+            f"    region: '{self.region}',\n"
+            f"    userPoolId: '{user_pool.user_pool_id}',\n"
+            f"    userPoolClientId: '{user_pool_client.user_pool_client_id}',\n"
+            f"    cognitoDomain: '{hosted_ui_base}',\n"
+            f"    redirectUri: '{dashboard_url}',\n"
+            f"    logoutUri: '{dashboard_url}',\n"
+            f"    scannerId: '{scanner_id}'\n"
+            "  };\n"
+            "  if (cfg.apiUrl) cfg.apiUrl = cfg.apiUrl.replace(/\\/+$/, '');\n"
+            "  if (cfg.cognitoDomain) cfg.cognitoDomain = cfg.cognitoDomain.replace(/\\/+$/, '');\n"
+            "  window.SCANNER_CONFIG = cfg;\n"
+            "  window.SCANNER_API_URL = cfg.apiUrl;\n"
+            "})();\n"
         )
         s3deploy.BucketDeployment(
             self,

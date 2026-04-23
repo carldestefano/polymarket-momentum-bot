@@ -30,6 +30,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+from polymarket_scanner.market_maker import run_mm_tick  # noqa: E402
 from polymarket_scanner.paper import run_paper_tick  # noqa: E402
 from polymarket_scanner.scan import run_scan  # noqa: E402
 
@@ -38,6 +39,9 @@ OPPORTUNITIES_TABLE = os.environ.get("OPPORTUNITIES_TABLE")
 CONFIG_TABLE = os.environ.get("CONFIG_TABLE")
 PAPER_POSITIONS_TABLE = os.environ.get("PAPER_POSITIONS_TABLE")
 PAPER_TRADES_TABLE = os.environ.get("PAPER_TRADES_TABLE")
+MM_QUOTES_TABLE = os.environ.get("MM_QUOTES_TABLE")
+MM_FILLS_TABLE = os.environ.get("MM_FILLS_TABLE")
+MM_INVENTORY_TABLE = os.environ.get("MM_INVENTORY_TABLE")
 SCANNER_ID = os.environ.get("SCANNER_ID", "default")
 MARKET_LIMIT = int(os.environ.get("MARKET_LIMIT", "500"))
 TOP_N = int(os.environ.get("TOP_N", "50"))
@@ -212,6 +216,125 @@ def _write_paper_fills(fills: list) -> None:
             bw.put_item(Item=_to_decimal(item))
 
 
+def _load_mm_active_quotes() -> list:
+    if not MM_QUOTES_TABLE:
+        return []
+    try:
+        from boto3.dynamodb.conditions import Key
+
+        # ACTIVE quotes only; quote_sk is prefixed "ACTIVE#..." so we can
+        # slice with begins_with.
+        resp = _ddb.Table(MM_QUOTES_TABLE).query(
+            KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID)
+            & Key("quote_sk").begins_with("ACTIVE#"),
+            Limit=500,
+        )
+        items = resp.get("Items") or []
+        return [_from_decimal(i) for i in items]
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("mm active quotes load failed: %s", e)
+        return []
+
+
+def _load_mm_inventory() -> list:
+    if not MM_INVENTORY_TABLE:
+        return []
+    try:
+        from boto3.dynamodb.conditions import Key
+
+        resp = _ddb.Table(MM_INVENTORY_TABLE).query(
+            KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID),
+            Limit=500,
+        )
+        items = resp.get("Items") or []
+        return [_from_decimal(i) for i in items]
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("mm inventory load failed: %s", e)
+        return []
+
+
+def _write_mm_quotes(quotes: list) -> None:
+    """Persist quotes, keyed so ACTIVE rows dedupe on quote_id and terminal
+    rows are append-only in the quote ledger.
+    """
+    if not MM_QUOTES_TABLE:
+        return
+    table = _ddb.Table(MM_QUOTES_TABLE)
+    # First, delete prior ACTIVE rows for this scanner so expired/filled
+    # quotes don't linger as "active" in the table. Simpler than computing
+    # exact removals.
+    from boto3.dynamodb.conditions import Key
+
+    try:
+        prior = table.query(
+            KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID)
+            & Key("quote_sk").begins_with("ACTIVE#"),
+            Limit=500,
+        ).get("Items") or []
+        with table.batch_writer() as bw:
+            for item in prior:
+                bw.delete_item(
+                    Key={
+                        "scanner_id": item["scanner_id"],
+                        "quote_sk": item["quote_sk"],
+                    }
+                )
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("mm quotes clear-active failed: %s", e)
+
+    with table.batch_writer(overwrite_by_pkeys=["scanner_id", "quote_sk"]) as bw:
+        for q in quotes:
+            status = q.get("status") or "ACTIVE"
+            qid = q.get("quote_id") or ""
+            placed = q.get("placed_at") or ""
+            if status == "ACTIVE":
+                sk = f"ACTIVE#{placed}#{qid}"
+            else:
+                closed = q.get("closed_at") or q.get("filled_at") or placed
+                sk = f"TERMINAL#{closed}#{qid}"
+            item = {"scanner_id": SCANNER_ID, "quote_sk": sk, **q}
+            bw.put_item(Item=_to_decimal(item))
+
+
+def _write_mm_fills(fills: list) -> None:
+    if not MM_FILLS_TABLE or not fills:
+        return
+    table = _ddb.Table(MM_FILLS_TABLE)
+    with table.batch_writer(overwrite_by_pkeys=["scanner_id", "fill_sk"]) as bw:
+        for i, f in enumerate(fills):
+            ts = f.get("ts") or ""
+            market_id = str(f.get("market_id") or "")
+            sk = f"{ts}#{i:04d}#{market_id}"
+            item = {"scanner_id": SCANNER_ID, "fill_sk": sk, **f}
+            bw.put_item(Item=_to_decimal(item))
+
+
+def _write_mm_inventory(inventory: list) -> None:
+    if not MM_INVENTORY_TABLE:
+        return
+    table = _ddb.Table(MM_INVENTORY_TABLE)
+    with table.batch_writer(overwrite_by_pkeys=["scanner_id", "market_id"]) as bw:
+        for inv in inventory:
+            mid = str(inv.get("market_id") or "")
+            if not mid:
+                continue
+            item = {"scanner_id": SCANNER_ID, "market_id": mid, **inv}
+            bw.put_item(Item=_to_decimal(item))
+
+
+def _write_mm_summary(summary: Dict[str, Any]) -> None:
+    if not OPPORTUNITIES_TABLE:
+        return
+    try:
+        _ddb.Table(OPPORTUNITIES_TABLE).put_item(
+            Item=_to_decimal(
+                {"scanner_id": SCANNER_ID, "sk": "mm#latest", **summary}
+            )
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("mm summary write failed: %s", e)
+
+
 def _write_paper_summary(summary: Dict[str, Any]) -> None:
     """Pin the latest paper-trading summary onto opportunities meta row."""
     if not OPPORTUNITIES_TABLE:
@@ -270,13 +393,39 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         log.warning("paper tick failed: %s", e)
         paper_summary = {"error": str(e)}
 
+    # --- Stage 3: market-making tick ---------------------------------------
+    # Same pattern as paper: always run so inventory marks on every scan;
+    # the engine itself respects market_making_enabled and skips new quotes
+    # when disabled.
+    mm_summary: Dict[str, Any] = {}
+    try:
+        prior_quotes = _load_mm_active_quotes()
+        prior_inventory = _load_mm_inventory()
+        mm_tick = run_mm_tick(
+            scanned_at=result["scanned_at"],
+            opportunities=result.get("opportunities") or [],
+            quotes=prior_quotes,
+            inventory=prior_inventory,
+            config=cfg,
+            now=datetime.now(tz=timezone.utc),
+        )
+        _write_mm_quotes(mm_tick["quotes"])
+        _write_mm_fills(mm_tick["fills"])
+        _write_mm_inventory(mm_tick["inventory"])
+        mm_summary = mm_tick["summary"]
+        _write_mm_summary(mm_summary)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("mm tick failed: %s", e)
+        mm_summary = {"error": str(e)}
+
     elapsed = time.time() - started
     log.info(
-        "scan ok: total=%s btc=%s top=%s paper_open=%s elapsed=%.2fs",
+        "scan ok: total=%s btc=%s top=%s paper_open=%s mm_active=%s elapsed=%.2fs",
         result.get("total_markets"),
         result.get("btc_markets"),
         len(result.get("opportunities") or []),
         paper_summary.get("open_count"),
+        mm_summary.get("active_quote_count"),
         elapsed,
     )
     return {
@@ -286,6 +435,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "btc_markets": result.get("btc_markets"),
         "top_n": len(result.get("opportunities") or []),
         "paper": paper_summary,
+        "mm": mm_summary,
         "elapsed_sec": round(elapsed, 3),
     }
 

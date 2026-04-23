@@ -123,3 +123,54 @@ def test_paper_routes_are_registered(template):
         assert any(path in rk for rk in route_keys), (
             f"expected at least one route for {path}, got {route_keys}"
         )
+
+
+def test_mm_tables_exist(template):
+    """Stage 3 adds MmQuotesTable, MmFillsTable, MmInventoryTable."""
+    tables = template.find_resources("AWS::DynamoDB::Table")
+    names = list(tables.keys())
+    assert any(n.startswith("MmQuotesTable") for n in names), names
+    assert any(n.startswith("MmFillsTable") for n in names), names
+    assert any(n.startswith("MmInventoryTable") for n in names), names
+
+
+def test_mm_table_outputs_exist(template):
+    for out in ("MmQuotesTableName", "MmFillsTableName", "MmInventoryTableName"):
+        assert template.find_outputs(out), f"missing {out} output"
+
+
+def test_mm_routes_are_registered(template):
+    routes = template.find_resources("AWS::ApiGatewayV2::Route")
+    route_keys = [r["Properties"]["RouteKey"] for r in routes.values()]
+    expected_paths = [
+        "/mm/status",
+        "/mm/quotes",
+        "/mm/fills",
+        "/mm/inventory",
+        "/mm/reset",
+    ]
+    for path in expected_paths:
+        assert any(path in rk for rk in route_keys), (
+            f"expected at least one route for {path}, got {route_keys}"
+        )
+
+
+def test_no_secrets_manager_or_live_trading_resources(template):
+    """Stage 3 is simulation only. No Secrets Manager, no KMS keys,
+    no external HTTP invocation resources should appear.
+    """
+    secrets = template.find_resources("AWS::SecretsManager::Secret")
+    assert not secrets, f"unexpected SecretsManager resources: {list(secrets)}"
+    # The IAM role statements should NOT mention secretsmanager either.
+    policies = template.find_resources("AWS::IAM::Policy")
+    for logical_id, pol in policies.items():
+        doc = pol["Properties"].get("PolicyDocument", {})
+        for stmt in doc.get("Statement", []) or []:
+            action = stmt.get("Action")
+            actions = action if isinstance(action, list) else [action]
+            for a in actions:
+                if a is None:
+                    continue
+                assert "secretsmanager" not in str(a).lower(), (
+                    f"unexpected secretsmanager permission in {logical_id}: {a}"
+                )

@@ -166,6 +166,98 @@
     </section>
 
     <section>
+      <h2>Market making (Stage 3 simulation)</h2>
+      <p class="muted" id="mm-disabled-note" hidden>
+        Market making is currently <strong>disabled</strong>. Enable it by
+        setting <code>market_making_enabled=true</code> in ConfigTable
+        (see <code>docs/AWS_DEPLOYMENT.md</code>) and re-running the
+        scanner. Until then, no simulated quotes will be placed.
+      </p>
+      <div class="cards" id="mm-cards">
+        <div class="card"><div class="card-label">Enabled</div><div class="card-value" id="mm-enabled">?</div></div>
+        <div class="card"><div class="card-label">Active quotes</div><div class="card-value" id="mm-active-quotes">–</div></div>
+        <div class="card"><div class="card-label">Inventory exposure</div><div class="card-value" id="mm-exposure">–</div></div>
+        <div class="card"><div class="card-label">Unrealized P&amp;L</div><div class="card-value" id="mm-unrealized">–</div></div>
+        <div class="card"><div class="card-label">Realized P&amp;L</div><div class="card-value" id="mm-realized">–</div></div>
+        <div class="card"><div class="card-label">Total P&amp;L</div><div class="card-value" id="mm-total-pnl">–</div></div>
+        <div class="card"><div class="card-label">Fills this tick</div><div class="card-value" id="mm-fills-tick">–</div></div>
+        <div class="card"><div class="card-label">Inventory markets</div><div class="card-value" id="mm-inv-markets">–</div></div>
+      </div>
+      <div class="controls">
+        <button id="mm-refresh">Refresh MM</button>
+        <button id="mm-reset" class="danger">Reset MM state</button>
+        <span class="muted" id="mm-config-summary"></span>
+      </div>
+      <p id="mm-error" class="error" hidden></p>
+
+      <h3>Quotes (active &amp; recent)</h3>
+      <div class="table-wrap">
+        <table id="mm-quotes-table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Price</th>
+              <th>Shares</th>
+              <th>Notional</th>
+              <th>FV</th>
+              <th>Placed</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="mm-quotes-empty" class="muted" hidden>
+        No market-making quotes yet. They will appear here once market
+        making is enabled and the scanner finds eligible markets.
+      </p>
+
+      <h3>Recent simulated MM fills</h3>
+      <div class="table-wrap">
+        <table id="mm-fills-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Price</th>
+              <th>Shares</th>
+              <th>Notional</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="mm-fills-empty" class="muted" hidden>
+        No simulated MM fills yet.
+      </p>
+
+      <h3>Inventory &amp; P&amp;L by market</h3>
+      <div class="table-wrap">
+        <table id="mm-inventory-table">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Shares</th>
+              <th>Avg cost</th>
+              <th>Notional</th>
+              <th>Mark</th>
+              <th>Unrealized</th>
+              <th>Realized</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="mm-inventory-empty" class="muted" hidden>
+        No market-making inventory yet.
+      </p>
+    </section>
+
+    <section>
       <h2>Recent scans</h2>
       <div class="table-wrap">
         <table id="scans-table">
@@ -185,10 +277,10 @@
 
     <footer>
       <p class="muted">
-        Stage 1 scanner + Stage 2 paper-trading simulation. No wallet,
-        no private keys, no order placement, no live trading. Paper
-        fills are simulated in software only. This is not financial
-        advice.
+        Stage 1 scanner + Stage 2 paper directional trading + Stage 3
+        market-making simulation. No wallet, no private keys, no order
+        placement, no live trading. All fills are simulated in software
+        only. This is not financial advice.
       </p>
     </footer>
   </main>

@@ -1,8 +1,8 @@
-"""PolymarketScannerStack - Stage 1 + Stage 2 scanner-only infrastructure.
+"""PolymarketScannerStack - Stage 1 + Stage 2 + Stage 3 infrastructure.
 
 Resources:
     - DynamoDB tables: config, scans, opportunities, paper_positions,
-      paper_trades (pay-per-request)
+      paper_trades, mm_quotes, mm_fills, mm_inventory (pay-per-request)
     - Scanner Lambda (Python 3.12) scheduled every 5 minutes via EventBridge
     - API Lambda (Python 3.12) behind JWT-protected HTTP API Gateway
     - S3 + CloudFront static dashboard
@@ -10,15 +10,17 @@ Resources:
     - CloudWatch log groups
     - Least-privilege IAM roles; NO wallet, NO secrets manager, NO trading
 
-Stage 2 adds a paper-trading simulation: the scanner persists simulated
-positions and fills to the two new tables after each scan, and the API
-surfaces them under /paper/*. Paper trading is disabled by default and
-must be enabled via ConfigTable (see docs/AWS_DEPLOYMENT.md).
+Stage 2 adds a paper-trading simulation (directional BUY YES). Stage 3
+adds a market-making simulation: simulated maker quotes, conservative
+book-cross fills, and per-market inventory tracking. All trading
+features are simulation-only. Both features are disabled by default
+and must be enabled via ConfigTable (see docs/AWS_DEPLOYMENT.md).
 
 Outputs:
     DashboardUrl, ApiUrl, UserPoolId, UserPoolClientId, CognitoDomain,
     HostedUiLoginUrl, ConfigTableName, ScansTableName, OpportunitiesTableName,
-    PaperPositionsTableName, PaperTradesTableName, ScannerFunctionName,
+    PaperPositionsTableName, PaperTradesTableName, MmQuotesTableName,
+    MmFillsTableName, MmInventoryTableName, ScannerFunctionName,
     ScheduleRuleName.
 """
 
@@ -137,6 +139,49 @@ class PolymarketScannerStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
         )
 
+        # --- Stage 3: market-making tables ----------------------------------
+        # Quotes: ledger of every simulated quote. sk prefix ACTIVE#/TERMINAL#
+        # so the scanner and API can cheaply slice active vs. closed without
+        # a GSI.
+        mm_quotes_table = ddb.Table(
+            self,
+            "MmQuotesTable",
+            partition_key=ddb.Attribute(
+                name="scanner_id", type=ddb.AttributeType.STRING
+            ),
+            sort_key=ddb.Attribute(
+                name="quote_sk", type=ddb.AttributeType.STRING
+            ),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        # MM fills: append-only ledger of simulated maker fills.
+        mm_fills_table = ddb.Table(
+            self,
+            "MmFillsTable",
+            partition_key=ddb.Attribute(
+                name="scanner_id", type=ddb.AttributeType.STRING
+            ),
+            sort_key=ddb.Attribute(
+                name="fill_sk", type=ddb.AttributeType.STRING
+            ),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        # MM inventory: one row per market, current shares / avg cost / P&L.
+        mm_inventory_table = ddb.Table(
+            self,
+            "MmInventoryTable",
+            partition_key=ddb.Attribute(
+                name="scanner_id", type=ddb.AttributeType.STRING
+            ),
+            sort_key=ddb.Attribute(
+                name="market_id", type=ddb.AttributeType.STRING
+            ),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+
         # --- Log groups ------------------------------------------------------
         scanner_log_group = logs.LogGroup(
             self,
@@ -169,6 +214,9 @@ class PolymarketScannerStack(Stack):
             opportunities_table,
             paper_positions_table,
             paper_trades_table,
+            mm_quotes_table,
+            mm_fills_table,
+            mm_inventory_table,
         ):
             table.grant_read_write_data(scanner_role)
 
@@ -189,6 +237,9 @@ class PolymarketScannerStack(Stack):
                 "OPPORTUNITIES_TABLE": opportunities_table.table_name,
                 "PAPER_POSITIONS_TABLE": paper_positions_table.table_name,
                 "PAPER_TRADES_TABLE": paper_trades_table.table_name,
+                "MM_QUOTES_TABLE": mm_quotes_table.table_name,
+                "MM_FILLS_TABLE": mm_fills_table.table_name,
+                "MM_INVENTORY_TABLE": mm_inventory_table.table_name,
                 "MARKET_LIMIT": "500",
                 "TOP_N": "50",
                 "LOG_LEVEL": "INFO",
@@ -308,6 +359,9 @@ class PolymarketScannerStack(Stack):
             opportunities_table,
             paper_positions_table,
             paper_trades_table,
+            mm_quotes_table,
+            mm_fills_table,
+            mm_inventory_table,
         ):
             table.grant_read_write_data(api_role)
         scanner_fn.grant_invoke(api_role)
@@ -330,6 +384,9 @@ class PolymarketScannerStack(Stack):
                 "OPPORTUNITIES_TABLE": opportunities_table.table_name,
                 "PAPER_POSITIONS_TABLE": paper_positions_table.table_name,
                 "PAPER_TRADES_TABLE": paper_trades_table.table_name,
+                "MM_QUOTES_TABLE": mm_quotes_table.table_name,
+                "MM_FILLS_TABLE": mm_fills_table.table_name,
+                "MM_INVENTORY_TABLE": mm_inventory_table.table_name,
                 "SCANNER_FUNCTION_NAME": scanner_fn.function_name,
             },
         )
@@ -397,6 +454,11 @@ class PolymarketScannerStack(Stack):
             "/paper/positions",
             "/paper/trades",
             "/paper/reset",
+            "/mm/status",
+            "/mm/quotes",
+            "/mm/fills",
+            "/mm/inventory",
+            "/mm/reset",
         ):
             http_api.add_routes(
                 path=path,
@@ -457,6 +519,11 @@ class PolymarketScannerStack(Stack):
         )
         CfnOutput(
             self, "PaperTradesTableName", value=paper_trades_table.table_name
+        )
+        CfnOutput(self, "MmQuotesTableName", value=mm_quotes_table.table_name)
+        CfnOutput(self, "MmFillsTableName", value=mm_fills_table.table_name)
+        CfnOutput(
+            self, "MmInventoryTableName", value=mm_inventory_table.table_name
         )
         CfnOutput(self, "ScannerFunctionName", value=scanner_fn.function_name)
         CfnOutput(self, "ScheduleRuleName", value=schedule_rule.rule_name)

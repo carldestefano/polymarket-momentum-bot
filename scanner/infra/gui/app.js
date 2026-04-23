@@ -379,10 +379,11 @@
         setApiError("API error: " + (e.message || e));
       }
     }
-    // Paper trading fetches are tolerant of partial failure: the scanner
-    // panels should still render even if the paper tables are missing
-    // (e.g. first deploy before the scanner has run).
+    // Paper trading + market-making fetches are tolerant of partial
+    // failure: the scanner panels should still render even if those
+    // tables are missing (e.g. first deploy before the scanner has run).
     refreshPaper();
+    refreshMm();
   }
 
   // --- Paper trading -----------------------------------------------------
@@ -532,6 +533,181 @@
     }
   }
 
+  // --- Market making (Stage 3) -------------------------------------------
+
+  function setMmError(msg) {
+    const el = $("mm-error");
+    if (!msg) {
+      el.hidden = true;
+      el.textContent = "";
+    } else {
+      el.hidden = false;
+      el.textContent = msg;
+    }
+  }
+
+  function renderMmSummary(data) {
+    const cfg = (data && data.config) || {};
+    const s = (data && data.summary) || {};
+    const enabled = Boolean(cfg.market_making_enabled);
+    $("mm-enabled").textContent = enabled ? "yes" : "no";
+    $("mm-disabled-note").hidden = enabled;
+    $("mm-active-quotes").textContent =
+      s.active_quote_count != null ? s.active_quote_count : "–";
+    $("mm-exposure").textContent =
+      s.inventory_exposure_usdc != null
+        ? "$" + Number(s.inventory_exposure_usdc).toFixed(2)
+        : "–";
+    const upnl = s.unrealized_pnl_usdc;
+    const rpnl = s.realized_pnl_usdc;
+    const tpnl = s.total_pnl_usdc;
+    const u = $("mm-unrealized");
+    u.textContent = fmtPnl(upnl);
+    u.className = "card-value " + pnlClass(upnl);
+    const r = $("mm-realized");
+    r.textContent = fmtPnl(rpnl);
+    r.className = "card-value " + pnlClass(rpnl);
+    const t = $("mm-total-pnl");
+    t.textContent = fmtPnl(tpnl);
+    t.className = "card-value " + pnlClass(tpnl);
+    $("mm-fills-tick").textContent =
+      s.fills_this_tick != null ? s.fills_this_tick : "–";
+    $("mm-inv-markets").textContent =
+      s.inventory_markets != null ? s.inventory_markets : "–";
+
+    const parts = [];
+    if (cfg.mm_quote_size_usdc != null)
+      parts.push("quote $" + cfg.mm_quote_size_usdc);
+    if (cfg.mm_max_position_usdc_per_market != null)
+      parts.push("per-market $" + cfg.mm_max_position_usdc_per_market);
+    if (cfg.mm_max_total_inventory_usdc != null)
+      parts.push("total $" + cfg.mm_max_total_inventory_usdc);
+    if (cfg.mm_max_markets != null)
+      parts.push("max markets " + cfg.mm_max_markets);
+    if (cfg.mm_base_quote_width != null)
+      parts.push("width " + Number(cfg.mm_base_quote_width).toFixed(3));
+    $("mm-config-summary").textContent = parts.length
+      ? "Limits: " + parts.join(" | ")
+      : "";
+  }
+
+  function renderMmQuotes(items) {
+    const tbody = $("mm-quotes-table").querySelector("tbody");
+    tbody.innerHTML = "";
+    if (!items || !items.length) {
+      $("mm-quotes-empty").hidden = false;
+      return;
+    }
+    $("mm-quotes-empty").hidden = true;
+    items.forEach((q) => {
+      const tr = document.createElement("tr");
+      const link = q.url
+        ? `<a href="${q.url}" target="_blank" rel="noopener">${escapeHtml(q.question || q.slug || q.market_id || "")}</a>`
+        : escapeHtml(q.question || q.market_id || "");
+      const reason = q.close_reason || (q.status === "FILLED" ? "filled" : "");
+      tr.innerHTML = `
+        <td>${escapeHtml(q.status || "")}</td>
+        <td>${link}</td>
+        <td>${escapeHtml(q.side || "")}</td>
+        <td>${fmtCents(q.price)}</td>
+        <td>${fmtNum(q.shares, 2)}</td>
+        <td>$${fmtNum(q.notional_usdc, 2)}</td>
+        <td>${q.fair_value != null ? Number(q.fair_value).toFixed(3) : "–"}</td>
+        <td>${escapeHtml(q.placed_at || "")}</td>
+        <td>${escapeHtml(reason)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderMmFills(items) {
+    const tbody = $("mm-fills-table").querySelector("tbody");
+    tbody.innerHTML = "";
+    if (!items || !items.length) {
+      $("mm-fills-empty").hidden = false;
+      return;
+    }
+    $("mm-fills-empty").hidden = true;
+    items.forEach((f) => {
+      const tr = document.createElement("tr");
+      const link = f.url
+        ? `<a href="${f.url}" target="_blank" rel="noopener">${escapeHtml(f.question || f.market_id || "")}</a>`
+        : escapeHtml(f.question || f.market_id || "");
+      tr.innerHTML = `
+        <td>${escapeHtml(f.ts || "")}</td>
+        <td>${link}</td>
+        <td>${escapeHtml(f.side || "")}</td>
+        <td>${fmtCents(f.price)}</td>
+        <td>${fmtNum(f.shares, 2)}</td>
+        <td>$${fmtNum(f.notional_usdc, 2)}</td>
+        <td>${escapeHtml(f.fill_reason || "")}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderMmInventory(items) {
+    const tbody = $("mm-inventory-table").querySelector("tbody");
+    tbody.innerHTML = "";
+    if (!items || !items.length) {
+      $("mm-inventory-empty").hidden = false;
+      return;
+    }
+    $("mm-inventory-empty").hidden = true;
+    items.forEach((i) => {
+      const tr = document.createElement("tr");
+      const link = i.url
+        ? `<a href="${i.url}" target="_blank" rel="noopener">${escapeHtml(i.question || i.slug || i.market_id || "")}</a>`
+        : escapeHtml(i.question || i.market_id || "");
+      tr.innerHTML = `
+        <td>${link}</td>
+        <td>${fmtNum(i.shares, 2)}</td>
+        <td>${fmtCents(i.avg_cost)}</td>
+        <td>$${fmtNum(i.notional_usdc, 2)}</td>
+        <td>${fmtCents(i.mark_price)}</td>
+        <td class="${pnlClass(i.unrealized_pnl)}">${fmtPnl(i.unrealized_pnl)}</td>
+        <td class="${pnlClass(i.realized_pnl)}">${fmtPnl(i.realized_pnl)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  async function refreshMm() {
+    setMmError("");
+    try {
+      const [status, quotes, fills, inv] = await Promise.all([
+        apiGet("/mm/status"),
+        apiGet("/mm/quotes?status=all&limit=100"),
+        apiGet("/mm/fills?limit=50"),
+        apiGet("/mm/inventory"),
+      ]);
+      renderMmSummary(status);
+      renderMmQuotes((quotes && quotes.items) || []);
+      renderMmFills((fills && fills.items) || []);
+      renderMmInventory((inv && inv.items) || []);
+    } catch (e) {
+      if (String(e.message || e) !== "unauthorized") {
+        setMmError("MM API error: " + (e.message || e));
+      }
+    }
+  }
+
+  async function resetMm() {
+    if (!window.confirm(
+      "Reset the market-making state? This permanently deletes every " +
+        "simulated quote, fill, and inventory row. This cannot be undone.",
+    )) {
+      return;
+    }
+    setMmError("");
+    try {
+      await apiPost("/mm/reset", {});
+      await refreshMm();
+    } catch (e) {
+      setMmError("MM reset failed: " + (e.message || e));
+    }
+  }
+
   async function resetPaper() {
     if (!window.confirm(
       "Reset the paper portfolio? This permanently deletes every " +
@@ -611,6 +787,8 @@
     $("trigger-scan").addEventListener("click", triggerScan);
     $("paper-refresh").addEventListener("click", refreshPaper);
     $("paper-reset").addEventListener("click", resetPaper);
+    $("mm-refresh").addEventListener("click", refreshMm);
+    $("mm-reset").addEventListener("click", resetMm);
     ["filter-liq", "filter-days", "filter-short"].forEach((id) =>
       $(id).addEventListener("input", applyFilters),
     );

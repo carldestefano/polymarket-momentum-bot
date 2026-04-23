@@ -1,7 +1,7 @@
-# Polymarket BTC Scanner — Stage 1 + Stage 2 paper trading
+# Polymarket BTC Scanner — Stage 1 + Stage 2 paper trading + Stage 3 market making
 
-**Scanner-only + paper trading only. No wallet. No private keys. No
-order placement. No live trading.**
+**Scanner + paper trading + market-making SIMULATION only. No wallet.
+No private keys. No order placement. No live trading.**
 
 A beginner-friendly, read-only scanner that pulls active Polymarket
 prediction markets, filters them to BTC-related markets, computes a set
@@ -12,10 +12,18 @@ Cognito-protected static dashboard backed by a JWT-protected HTTP API.
 
 Stage 2 adds a **paper trading simulation** that consumes Stage 1's
 ranked opportunities and opens simulated BUY YES positions against
-risk-bounded limits. Fills, marks, and P&L are all computed in software
-— **nothing touches Polymarket or any wallet.** See
-[docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md#paper-trading-stage-2)
+risk-bounded limits.
+
+Stage 3 adds a **market-making simulation**: fair-value-based bid/ask
+quote recommendations, maker-only quote lifecycle, conservative
+book-cross fills, per-market inventory tracking with running
+average-cost P&L, and inventory skew to push against one-sided
+inventory. It never places real orders. See
+[docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md#market-making-stage-3)
 for how to enable it.
+
+Fills, marks, and P&L for both stages are computed in software — nothing
+touches Polymarket or any wallet.
 
 > **Not financial advice.** Prediction markets can and do lose money.
 > This project intentionally cannot place orders — it exists only to
@@ -30,12 +38,15 @@ for how to enable it.
 - **BTC classifier** that rejects markets that mention other crypto
   assets even if the word "bitcoin" appears somewhere in the question.
 - **DynamoDB tables** (pay-per-request) for config, scan summaries, the
-  latest ranked opportunities, plus Stage 2 `PaperPositionsTable` and
-  `PaperTradesTable` for the simulation.
+  latest ranked opportunities, Stage 2 `PaperPositionsTable` and
+  `PaperTradesTable`, plus Stage 3 `MmQuotesTable`, `MmFillsTable`,
+  `MmInventoryTable`.
 - **HTTP API Lambda** behind Amazon API Gateway HTTP API with a
   Cognito JWT authorizer. Endpoints: `/status`, `/config`,
-  `/opportunities`, `/scans`, `/scan` (manual trigger), plus Stage 2
-  `/paper/status`, `/paper/positions`, `/paper/trades`, `/paper/reset`.
+  `/opportunities`, `/scans`, `/scan` (manual trigger), Stage 2
+  `/paper/status`, `/paper/positions`, `/paper/trades`, `/paper/reset`,
+  plus Stage 3 `/mm/status`, `/mm/quotes`, `/mm/fills`,
+  `/mm/inventory`, `/mm/reset`.
 - **Static dashboard** (vanilla HTML + CSS + JS) deployed to S3 +
   CloudFront, logging in via the Cognito Hosted UI using the
   Authorization Code + PKCE flow.

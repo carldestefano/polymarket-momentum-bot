@@ -213,6 +213,14 @@ Paper trading keys (see `Paper trading (Stage 2)` below):
 `max_resolution_days`, `cooldown_seconds`, `allow_short_horizon_only`,
 `close_on_edge_flip`, `slippage_buffer`.
 
+Market-making keys (see `Market making (Stage 3)` below):
+`market_making_enabled`, `mm_max_markets`, `mm_min_liquidity_usdc`,
+`mm_max_spread`, `mm_min_edge_or_width`, `mm_quote_size_usdc`,
+`mm_max_position_usdc_per_market`, `mm_max_total_inventory_usdc`,
+`mm_base_quote_width`, `mm_inventory_skew_factor`,
+`mm_cancel_if_stale_seconds`, `mm_avoid_near_resolution_seconds`,
+`mm_fill_probability`.
+
 ## Paper trading (Stage 2)
 
 Paper trading is **disabled by default**. When disabled, the scanner
@@ -324,6 +332,141 @@ export POS=$(aws cloudformation describe-stacks \
 export TRD=$(aws cloudformation describe-stacks \
   --stack-name PolymarketScannerStack \
   --query "Stacks[0].Outputs[?OutputKey=='PaperTradesTableName'].OutputValue" \
+  --output text)
+# (Use aws dynamodb scan + delete-item in a loop, or recreate tables.)
+```
+
+## Market making (Stage 3)
+
+Stage 3 adds a **simulation-only** market-making engine. It generates
+fair-value-based bid/ask quotes, tracks a synthetic quote lifecycle
+(`ACTIVE` → `FILLED` | `CANCELLED` | `EXPIRED`), simulates fills
+conservatively from current book movement, and maintains per-market
+inventory with running-average cost and mark-to-bid P&L.
+
+> **Simulation only. No wallet. No private keys. No order placement. No
+> Polymarket auth. Not financial advice.**
+
+Market making is **disabled by default**. Like Stage 2 the scanner
+still runs a market-making tick on every scan so existing inventory
+marks to market, but no new quotes are placed until the flag is set.
+Enable it with:
+
+```
+export CFG=$(aws cloudformation describe-stacks \
+  --stack-name PolymarketScannerStack \
+  --query "Stacks[0].Outputs[?OutputKey=='ConfigTableName'].OutputValue" \
+  --output text)
+
+aws dynamodb update-item --table-name "$CFG" \
+  --key '{"scanner_id":{"S":"default"}}' \
+  --update-expression "SET market_making_enabled = :t" \
+  --expression-attribute-values '{":t":{"BOOL":true}}'
+```
+
+Conservative defaults shown below (small quote size, small global cap,
+narrow width, short stale cancel window, avoid near-resolution markets):
+
+```
+aws dynamodb update-item --table-name "$CFG" \
+  --key '{"scanner_id":{"S":"default"}}' \
+  --update-expression "SET \
+      mm_max_markets = :mk, \
+      mm_min_liquidity_usdc = :liq, \
+      mm_max_spread = :sp, \
+      mm_min_edge_or_width = :mew, \
+      mm_quote_size_usdc = :qs, \
+      mm_max_position_usdc_per_market = :mp, \
+      mm_max_total_inventory_usdc = :mt, \
+      mm_base_quote_width = :bw, \
+      mm_inventory_skew_factor = :isk, \
+      mm_cancel_if_stale_seconds = :cs, \
+      mm_avoid_near_resolution_seconds = :ar" \
+  --expression-attribute-values '{
+      ":mk": {"N":"3"},
+      ":liq":{"N":"2000"},
+      ":sp": {"N":"0.12"},
+      ":mew":{"N":"0.02"},
+      ":qs": {"N":"25"},
+      ":mp": {"N":"100"},
+      ":mt": {"N":"500"},
+      ":bw": {"N":"0.04"},
+      ":isk":{"N":"0.5"},
+      ":cs": {"N":"300"},
+      ":ar": {"N":"3600"}
+  }'
+```
+
+You can also POST `/config` via the dashboard's authenticated API with
+the same keys.
+
+### How MM fills are simulated
+
+- **Maker-only by default.** The simulator never "crosses" the visible
+  book: `quote_bid <= best_ask - 0.005` and
+  `quote_ask >= best_bid + 0.005`. We intentionally do not invent fills
+  that the real book would not execute.
+- **Deterministic book-cross model.** A BUY quote fills only when the
+  current best ask is at or below the quote price; a SELL quote fills
+  only when the current best bid is at or above the quote price. That
+  is deliberately conservative — real maker orders sometimes fill on
+  trades that go through inside the spread, but we cannot see them in
+  the Gamma catalog, so we pretend they don't exist.
+- **YES-long only.** Stage 3 does not model a short leg. SELL fills
+  only reduce existing long inventory; SELL quotes without inventory
+  never fill, and SELL fill shares are clamped to current inventory.
+- **Mark-to-bid.** Inventory marks to the current best bid (same
+  conservative choice as Stage 2), not the midpoint.
+- **Inventory skew.** Both quotes shift down when long YES — the ask
+  moves closer to mid (easier to reduce the position) and the bid moves
+  farther (harder to add to the position). Magnitude = inventory
+  fraction of `mm_max_position_usdc_per_market` × `mm_inventory_skew_factor`
+  × `mm_base_quote_width`.
+- **Risk gates** (spread, liquidity, time to resolution, missing fair
+  value, per-market and global notional caps) are enforced both when a
+  quote is created and when it fills.
+- **Lifecycle.** Active quotes become `EXPIRED` after
+  `mm_cancel_if_stale_seconds`, become `CANCELLED` when the market
+  vanishes from a scan, or become `FILLED` when the book crosses them.
+
+### Why Stage 3 is not live trading and not financial advice
+
+Every quote, fill, and inventory row is a DynamoDB write. No Polymarket
+order is ever placed. The scanner Lambda has no Polymarket credentials,
+no wallet, and its IAM role has no Secrets Manager or network-write
+permissions beyond DynamoDB and CloudWatch Logs. Real market making
+involves fee tiers, partial/iceberg fills, rebates, maker/taker order
+priority, queue position, resolution risk, and latency that this
+simulation deliberately does not model. Treat MM P&L as a strategy
+calibration diagnostic, not a forecast of live returns.
+
+### Reset the MM state
+
+Destructive — wipes every simulated MM quote, fill, and inventory row
+for the configured `scanner_id`. Either click **Reset MM state** on the
+dashboard (with browser confirmation), or call the authenticated API:
+
+```
+curl -X POST "$API_URL/mm/reset" \
+  -H "authorization: Bearer $ID_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{}'
+```
+
+If you want to wipe straight from DynamoDB (bypassing the API):
+
+```
+export QT=$(aws cloudformation describe-stacks \
+  --stack-name PolymarketScannerStack \
+  --query "Stacks[0].Outputs[?OutputKey=='MmQuotesTableName'].OutputValue" \
+  --output text)
+export FT=$(aws cloudformation describe-stacks \
+  --stack-name PolymarketScannerStack \
+  --query "Stacks[0].Outputs[?OutputKey=='MmFillsTableName'].OutputValue" \
+  --output text)
+export IT=$(aws cloudformation describe-stacks \
+  --stack-name PolymarketScannerStack \
+  --query "Stacks[0].Outputs[?OutputKey=='MmInventoryTableName'].OutputValue" \
   --output text)
 # (Use aws dynamodb scan + delete-item in a loop, or recreate tables.)
 ```

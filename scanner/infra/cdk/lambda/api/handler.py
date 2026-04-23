@@ -3,15 +3,20 @@
 Routes (all JSON, JWT-protected by API Gateway):
 
     GET  /status            -> { scanner_id, latest scan summary, tables }
-    GET  /config            -> current scanner + paper trading config
-    POST /config            -> set scanner/paper config overrides (partial)
+    GET  /config            -> current scanner + paper + mm config
+    POST /config            -> set config overrides (partial)
     GET  /opportunities     -> latest ranked BTC opportunities (?limit=50)
     GET  /scans             -> recent scan summaries (?limit=20)
     POST /scan              -> manually invoke the scanner Lambda
     GET  /paper/status      -> paper trading summary + effective config
     GET  /paper/positions   -> paper positions (?status=open|closed|all)
     GET  /paper/trades      -> recent simulated fills (?limit=100)
-    POST /paper/reset       -> wipe all paper positions + fills (destructive)
+    POST /paper/reset       -> wipe paper positions + fills (destructive)
+    GET  /mm/status         -> market making summary + effective config
+    GET  /mm/quotes         -> recent MM quotes (?status=active|terminal|all)
+    GET  /mm/fills          -> recent simulated MM fills (?limit=100)
+    GET  /mm/inventory      -> per-market MM inventory and P&L
+    POST /mm/reset          -> wipe MM quotes / fills / inventory (destructive)
 
 This handler has NO wallet credentials, NO trading permissions, and NO
 Secrets Manager access. It only reads/writes DynamoDB tables owned by
@@ -38,6 +43,9 @@ SCANS_TABLE = os.environ.get("SCANS_TABLE")
 OPPORTUNITIES_TABLE = os.environ.get("OPPORTUNITIES_TABLE")
 PAPER_POSITIONS_TABLE = os.environ.get("PAPER_POSITIONS_TABLE")
 PAPER_TRADES_TABLE = os.environ.get("PAPER_TRADES_TABLE")
+MM_QUOTES_TABLE = os.environ.get("MM_QUOTES_TABLE")
+MM_FILLS_TABLE = os.environ.get("MM_FILLS_TABLE")
+MM_INVENTORY_TABLE = os.environ.get("MM_INVENTORY_TABLE")
 SCANNER_FUNCTION_NAME = os.environ.get("SCANNER_FUNCTION_NAME")
 
 _ddb = boto3.resource("dynamodb")
@@ -64,7 +72,24 @@ PAPER_OVERRIDABLE_KEYS = {
     "close_on_edge_flip",
     "slippage_buffer",
 }
-OVERRIDABLE_KEYS = SCANNER_OVERRIDABLE_KEYS | PAPER_OVERRIDABLE_KEYS
+MM_OVERRIDABLE_KEYS = {
+    "market_making_enabled",
+    "mm_max_markets",
+    "mm_min_liquidity_usdc",
+    "mm_max_spread",
+    "mm_min_edge_or_width",
+    "mm_quote_size_usdc",
+    "mm_max_position_usdc_per_market",
+    "mm_max_total_inventory_usdc",
+    "mm_base_quote_width",
+    "mm_inventory_skew_factor",
+    "mm_cancel_if_stale_seconds",
+    "mm_avoid_near_resolution_seconds",
+    "mm_fill_probability",
+}
+OVERRIDABLE_KEYS = (
+    SCANNER_OVERRIDABLE_KEYS | PAPER_OVERRIDABLE_KEYS | MM_OVERRIDABLE_KEYS
+)
 
 
 class _DecimalEncoder(json.JSONEncoder):
@@ -357,6 +382,152 @@ def _reset_paper() -> Dict[str, Any]:
     }
 
 
+_MM_DEFAULTS = {
+    "market_making_enabled": False,
+    "mm_max_markets": 5,
+    "mm_min_liquidity_usdc": 1000.0,
+    "mm_max_spread": 0.15,
+    "mm_min_edge_or_width": 0.02,
+    "mm_quote_size_usdc": 50.0,
+    "mm_max_position_usdc_per_market": 200.0,
+    "mm_max_total_inventory_usdc": 1000.0,
+    "mm_base_quote_width": 0.04,
+    "mm_inventory_skew_factor": 0.5,
+    "mm_cancel_if_stale_seconds": 300,
+    "mm_avoid_near_resolution_seconds": 3600,
+    "mm_fill_probability": 1.0,
+}
+
+
+def _effective_mm_config() -> Dict[str, Any]:
+    cfg = _get_config() or {}
+    merged = dict(_MM_DEFAULTS)
+    for k in MM_OVERRIDABLE_KEYS:
+        if k in cfg and cfg[k] is not None:
+            merged[k] = cfg[k]
+    return merged
+
+
+def _get_mm_status() -> Dict[str, Any]:
+    table = _table(OPPORTUNITIES_TABLE)
+    latest = None
+    if table is not None:
+        try:
+            resp = table.get_item(
+                Key={"scanner_id": SCANNER_ID, "sk": "mm#latest"}
+            )
+            latest = resp.get("Item")
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("mm status get_item failed: %s", e)
+    return {
+        "scanner_id": SCANNER_ID,
+        "summary": latest,
+        "config": _effective_mm_config(),
+    }
+
+
+def _get_mm_quotes(status_filter: str, limit: int) -> Dict[str, Any]:
+    table = _table(MM_QUOTES_TABLE)
+    if table is None:
+        return {"items": [], "count": 0}
+    f = (status_filter or "all").lower()
+    if f == "active":
+        resp = table.query(
+            KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID)
+            & Key("quote_sk").begins_with("ACTIVE#"),
+            Limit=max(1, min(limit, 500)),
+        )
+    elif f == "terminal":
+        resp = table.query(
+            KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID)
+            & Key("quote_sk").begins_with("TERMINAL#"),
+            ScanIndexForward=False,
+            Limit=max(1, min(limit, 500)),
+        )
+    else:
+        resp = table.query(
+            KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID),
+            Limit=max(1, min(limit, 500)),
+        )
+    items = resp.get("Items") or []
+    # ACTIVE rows first, then newest terminals.
+    items.sort(
+        key=lambda i: (
+            0 if str(i.get("quote_sk") or "").startswith("ACTIVE#") else 1,
+            str(i.get("quote_sk") or ""),
+        )
+    )
+    return {"count": len(items), "items": items}
+
+
+def _get_mm_fills(limit: int) -> Dict[str, Any]:
+    table = _table(MM_FILLS_TABLE)
+    if table is None:
+        return {"items": [], "count": 0}
+    resp = table.query(
+        KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID),
+        ScanIndexForward=False,
+        Limit=max(1, min(limit, 500)),
+    )
+    items = resp.get("Items") or []
+    return {"count": len(items), "items": items}
+
+
+def _get_mm_inventory() -> Dict[str, Any]:
+    table = _table(MM_INVENTORY_TABLE)
+    if table is None:
+        return {"items": [], "count": 0}
+    resp = table.query(
+        KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID),
+        Limit=500,
+    )
+    items = resp.get("Items") or []
+    # Markets with live inventory first.
+    items.sort(
+        key=lambda i: (0 if float(i.get("shares") or 0) > 0 else 1, str(i.get("market_id") or "")),
+    )
+    return {"count": len(items), "items": items}
+
+
+def _reset_mm() -> Dict[str, Any]:
+    """Destructive: delete every MM quote, fill, and inventory row."""
+    deleted = {"quotes": 0, "fills": 0, "inventory": 0}
+    specs = [
+        (MM_QUOTES_TABLE, "quote_sk", "quotes"),
+        (MM_FILLS_TABLE, "fill_sk", "fills"),
+        (MM_INVENTORY_TABLE, "market_id", "inventory"),
+    ]
+    for table_name, sk_name, label in specs:
+        table = _table(table_name)
+        if table is None:
+            continue
+        try:
+            resp = table.query(
+                KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID),
+                Limit=500,
+            )
+            with table.batch_writer() as bw:
+                for item in resp.get("Items") or []:
+                    bw.delete_item(
+                        Key={
+                            "scanner_id": item["scanner_id"],
+                            sk_name: item[sk_name],
+                        }
+                    )
+                    deleted[label] += 1
+        except Exception as e:  # pragma: no cover - defensive
+            log.error("mm reset %s failed: %s", label, e)
+    opp_table = _table(OPPORTUNITIES_TABLE)
+    if opp_table is not None:
+        try:
+            opp_table.delete_item(
+                Key={"scanner_id": SCANNER_ID, "sk": "mm#latest"}
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("mm reset summary clear failed: %s", e)
+    return {"ok": True, **{f"deleted_{k}": v for k, v in deleted.items()}}
+
+
 def _trigger_scan() -> Dict[str, Any]:
     if not SCANNER_FUNCTION_NAME:
         return {"ok": False, "error": "scanner function not configured"}
@@ -410,6 +581,25 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return _response(200, _get_paper_trades(limit))
         if path.endswith("/paper/reset") and method == "POST":
             return _response(200, _reset_paper())
+        if path.endswith("/mm/status") and method == "GET":
+            return _response(200, _get_mm_status())
+        if path.endswith("/mm/quotes") and method == "GET":
+            status_filter = _query(event).get("status") or "all"
+            try:
+                limit = int(_query(event).get("limit") or "200")
+            except ValueError:
+                limit = 200
+            return _response(200, _get_mm_quotes(status_filter, limit))
+        if path.endswith("/mm/fills") and method == "GET":
+            try:
+                limit = int(_query(event).get("limit") or "100")
+            except ValueError:
+                limit = 100
+            return _response(200, _get_mm_fills(limit))
+        if path.endswith("/mm/inventory") and method == "GET":
+            return _response(200, _get_mm_inventory())
+        if path.endswith("/mm/reset") and method == "POST":
+            return _response(200, _reset_mm())
         return _response(404, {"error": "not found", "method": method, "path": path})
     except Exception as e:  # pragma: no cover - defensive
         log.exception("handler error")

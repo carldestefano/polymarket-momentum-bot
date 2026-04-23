@@ -46,7 +46,7 @@ PolymarketScannerStack(
     app,
     "PolymarketScannerStack",
     env=env,
-    description="Polymarket BTC scanner Stage 1 + Stage 2 paper trading - Lambda + DynamoDB + static dashboard.",
+    description="Polymarket BTC scanner Stage 1 + Stage 2 paper trading + Stage 3 market making - Lambda + DynamoDB + static dashboard.",
 )
 
 app.synth()

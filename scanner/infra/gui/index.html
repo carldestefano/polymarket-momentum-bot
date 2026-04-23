@@ -92,6 +92,80 @@
     </section>
 
     <section>
+      <h2>Paper trading (Stage 2 simulation)</h2>
+      <p class="muted" id="paper-disabled-note" hidden>
+        Paper trading is currently <strong>disabled</strong>. Enable it by
+        setting <code>paper_trading_enabled=true</code> in ConfigTable
+        (see <code>docs/AWS_DEPLOYMENT.md</code>) and re-running the
+        scanner. Until then, no simulated positions will open.
+      </p>
+      <div class="cards" id="paper-cards">
+        <div class="card"><div class="card-label">Enabled</div><div class="card-value" id="paper-enabled">?</div></div>
+        <div class="card"><div class="card-label">Open positions</div><div class="card-value" id="paper-open-count">–</div></div>
+        <div class="card"><div class="card-label">Open exposure</div><div class="card-value" id="paper-exposure">–</div></div>
+        <div class="card"><div class="card-label">Unrealized P&amp;L</div><div class="card-value" id="paper-unrealized">–</div></div>
+        <div class="card"><div class="card-label">Realized P&amp;L</div><div class="card-value" id="paper-realized">–</div></div>
+        <div class="card"><div class="card-label">Total P&amp;L</div><div class="card-value" id="paper-total-pnl">–</div></div>
+        <div class="card"><div class="card-label">Closed trades</div><div class="card-value" id="paper-trade-count">–</div></div>
+        <div class="card"><div class="card-label">Win rate</div><div class="card-value" id="paper-win-rate">–</div></div>
+      </div>
+      <div class="controls">
+        <button id="paper-refresh">Refresh paper</button>
+        <button id="paper-reset" class="danger">Reset paper portfolio</button>
+        <span class="muted" id="paper-config-summary"></span>
+      </div>
+      <p id="paper-error" class="error" hidden></p>
+
+      <h3>Open &amp; closed positions</h3>
+      <div class="table-wrap">
+        <table id="paper-positions-table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Entry</th>
+              <th>Mark/Exit</th>
+              <th>Shares</th>
+              <th>Notional</th>
+              <th>Unrealized</th>
+              <th>Realized</th>
+              <th>Opened</th>
+              <th>Close reason</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="paper-positions-empty" class="muted" hidden>
+        No paper positions yet. They will appear here once the scanner
+        finds opportunities meeting the configured edge / liquidity /
+        spread gates.
+      </p>
+
+      <h3>Recent simulated fills</h3>
+      <div class="table-wrap">
+        <table id="paper-trades-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Price</th>
+              <th>Shares</th>
+              <th>Notional</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="paper-trades-empty" class="muted" hidden>
+        No simulated fills yet.
+      </p>
+    </section>
+
+    <section>
       <h2>Recent scans</h2>
       <div class="table-wrap">
         <table id="scans-table">
@@ -111,8 +185,10 @@
 
     <footer>
       <p class="muted">
-        Stage 1 scanner only. No wallet, no private keys, no order
-        placement. This is not financial advice.
+        Stage 1 scanner + Stage 2 paper-trading simulation. No wallet,
+        no private keys, no order placement, no live trading. Paper
+        fills are simulated in software only. This is not financial
+        advice.
       </p>
     </footer>
   </main>

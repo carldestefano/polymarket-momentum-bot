@@ -1,7 +1,8 @@
-"""PolymarketScannerStack - Stage 1 scanner-only infrastructure.
+"""PolymarketScannerStack - Stage 1 + Stage 2 scanner-only infrastructure.
 
 Resources:
-    - DynamoDB tables: config, scans, opportunities (pay-per-request)
+    - DynamoDB tables: config, scans, opportunities, paper_positions,
+      paper_trades (pay-per-request)
     - Scanner Lambda (Python 3.12) scheduled every 5 minutes via EventBridge
     - API Lambda (Python 3.12) behind JWT-protected HTTP API Gateway
     - S3 + CloudFront static dashboard
@@ -9,10 +10,16 @@ Resources:
     - CloudWatch log groups
     - Least-privilege IAM roles; NO wallet, NO secrets manager, NO trading
 
+Stage 2 adds a paper-trading simulation: the scanner persists simulated
+positions and fills to the two new tables after each scan, and the API
+surfaces them under /paper/*. Paper trading is disabled by default and
+must be enabled via ConfigTable (see docs/AWS_DEPLOYMENT.md).
+
 Outputs:
     DashboardUrl, ApiUrl, UserPoolId, UserPoolClientId, CognitoDomain,
     HostedUiLoginUrl, ConfigTableName, ScansTableName, OpportunitiesTableName,
-    ScannerFunctionName, ScheduleRuleName.
+    PaperPositionsTableName, PaperTradesTableName, ScannerFunctionName,
+    ScheduleRuleName.
 """
 
 from __future__ import annotations
@@ -95,6 +102,41 @@ class PolymarketScannerStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
         )
 
+        # --- Stage 2: paper trading tables ----------------------------------
+        # Paper positions: one row per simulated position. sk encodes status
+        # so OPEN positions sort ahead of CLOSED ones (OPEN# < CLOSED#).
+        # Status is also duplicated into a top-level attribute so the API
+        # can filter without parsing the sort key.
+        paper_positions_table = ddb.Table(
+            self,
+            "PaperPositionsTable",
+            partition_key=ddb.Attribute(
+                name="scanner_id", type=ddb.AttributeType.STRING
+            ),
+            sort_key=ddb.Attribute(
+                name="position_sk", type=ddb.AttributeType.STRING
+            ),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+
+        # Paper trades/fills: append-only ledger of simulated fills.
+        # sk is the ISO timestamp of the fill, so a reverse query returns
+        # the newest fills first. TTL is left unset by default so operators
+        # can inspect a full history; add one later if ledger grows large.
+        paper_trades_table = ddb.Table(
+            self,
+            "PaperTradesTable",
+            partition_key=ddb.Attribute(
+                name="scanner_id", type=ddb.AttributeType.STRING
+            ),
+            sort_key=ddb.Attribute(
+                name="trade_sk", type=ddb.AttributeType.STRING
+            ),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+
         # --- Log groups ------------------------------------------------------
         scanner_log_group = logs.LogGroup(
             self,
@@ -121,7 +163,13 @@ class PolymarketScannerStack(Stack):
                 )
             ],
         )
-        for table in (config_table, scans_table, opportunities_table):
+        for table in (
+            config_table,
+            scans_table,
+            opportunities_table,
+            paper_positions_table,
+            paper_trades_table,
+        ):
             table.grant_read_write_data(scanner_role)
 
         scanner_fn = lambda_.Function(
@@ -139,6 +187,8 @@ class PolymarketScannerStack(Stack):
                 "CONFIG_TABLE": config_table.table_name,
                 "SCANS_TABLE": scans_table.table_name,
                 "OPPORTUNITIES_TABLE": opportunities_table.table_name,
+                "PAPER_POSITIONS_TABLE": paper_positions_table.table_name,
+                "PAPER_TRADES_TABLE": paper_trades_table.table_name,
                 "MARKET_LIMIT": "500",
                 "TOP_N": "50",
                 "LOG_LEVEL": "INFO",
@@ -252,7 +302,13 @@ class PolymarketScannerStack(Stack):
                 )
             ],
         )
-        for table in (config_table, scans_table, opportunities_table):
+        for table in (
+            config_table,
+            scans_table,
+            opportunities_table,
+            paper_positions_table,
+            paper_trades_table,
+        ):
             table.grant_read_write_data(api_role)
         scanner_fn.grant_invoke(api_role)
         # Note: deliberately NO secretsmanager access for the API role.
@@ -272,6 +328,8 @@ class PolymarketScannerStack(Stack):
                 "CONFIG_TABLE": config_table.table_name,
                 "SCANS_TABLE": scans_table.table_name,
                 "OPPORTUNITIES_TABLE": opportunities_table.table_name,
+                "PAPER_POSITIONS_TABLE": paper_positions_table.table_name,
+                "PAPER_TRADES_TABLE": paper_trades_table.table_name,
                 "SCANNER_FUNCTION_NAME": scanner_fn.function_name,
             },
         )
@@ -329,7 +387,17 @@ class PolymarketScannerStack(Stack):
         # but enumerating methods keeps the contract clear and prevents
         # future regressions where an authorizer could block preflight.
         api_methods = [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]
-        for path in ("/status", "/config", "/opportunities", "/scans", "/scan"):
+        for path in (
+            "/status",
+            "/config",
+            "/opportunities",
+            "/scans",
+            "/scan",
+            "/paper/status",
+            "/paper/positions",
+            "/paper/trades",
+            "/paper/reset",
+        ):
             http_api.add_routes(
                 path=path,
                 methods=api_methods,
@@ -382,6 +450,14 @@ class PolymarketScannerStack(Stack):
         CfnOutput(self, "ConfigTableName", value=config_table.table_name)
         CfnOutput(self, "ScansTableName", value=scans_table.table_name)
         CfnOutput(self, "OpportunitiesTableName", value=opportunities_table.table_name)
+        CfnOutput(
+            self,
+            "PaperPositionsTableName",
+            value=paper_positions_table.table_name,
+        )
+        CfnOutput(
+            self, "PaperTradesTableName", value=paper_trades_table.table_name
+        )
         CfnOutput(self, "ScannerFunctionName", value=scanner_fn.function_name)
         CfnOutput(self, "ScheduleRuleName", value=schedule_rule.rule_name)
         CfnOutput(self, "ScannerLogGroupName", value=scanner_log_group.log_group_name)

@@ -42,6 +42,7 @@
   let expiresAt = Number(sessionStorage.getItem(STORAGE.EXPIRES_AT) || 0);
   let lastOpps = [];
   let lastMeta = null;
+  let lastPaperStatus = null;
 
   function isAuthed() {
     return Boolean(idToken) && Date.now() < expiresAt - 15000;
@@ -378,6 +379,173 @@
         setApiError("API error: " + (e.message || e));
       }
     }
+    // Paper trading fetches are tolerant of partial failure: the scanner
+    // panels should still render even if the paper tables are missing
+    // (e.g. first deploy before the scanner has run).
+    refreshPaper();
+  }
+
+  // --- Paper trading -----------------------------------------------------
+
+  function setPaperError(msg) {
+    const el = $("paper-error");
+    if (!msg) {
+      el.hidden = true;
+      el.textContent = "";
+    } else {
+      el.hidden = false;
+      el.textContent = msg;
+    }
+  }
+
+  function fmtPnl(v) {
+    if (v === null || v === undefined || isNaN(Number(v))) return "–";
+    const n = Number(v);
+    const sign = n > 0 ? "+" : "";
+    return sign + "$" + n.toFixed(2);
+  }
+
+  function pnlClass(v) {
+    if (v === null || v === undefined || isNaN(Number(v))) return "";
+    const n = Number(v);
+    if (n > 0) return "pnl-pos";
+    if (n < 0) return "pnl-neg";
+    return "";
+  }
+
+  function renderPaperSummary(data) {
+    lastPaperStatus = data;
+    const cfg = (data && data.config) || {};
+    const s = (data && data.summary) || {};
+    const enabled = Boolean(cfg.paper_trading_enabled);
+    $("paper-enabled").textContent = enabled ? "yes" : "no";
+    $("paper-disabled-note").hidden = enabled;
+    $("paper-open-count").textContent = s.open_count != null ? s.open_count : "–";
+    $("paper-exposure").textContent =
+      s.open_exposure_usdc != null ? "$" + Number(s.open_exposure_usdc).toFixed(2) : "–";
+    const upnl = s.unrealized_pnl_usdc;
+    const rpnl = s.realized_pnl_usdc;
+    const tpnl = s.total_pnl_usdc;
+    const unrealEl = $("paper-unrealized");
+    unrealEl.textContent = fmtPnl(upnl);
+    unrealEl.className = "card-value " + pnlClass(upnl);
+    const realEl = $("paper-realized");
+    realEl.textContent = fmtPnl(rpnl);
+    realEl.className = "card-value " + pnlClass(rpnl);
+    const totEl = $("paper-total-pnl");
+    totEl.textContent = fmtPnl(tpnl);
+    totEl.className = "card-value " + pnlClass(tpnl);
+    $("paper-trade-count").textContent =
+      s.trade_count != null ? s.trade_count : "–";
+    $("paper-win-rate").textContent =
+      s.win_rate != null ? (Number(s.win_rate) * 100).toFixed(0) + "%" : "–";
+
+    const parts = [];
+    if (cfg.max_paper_trade_usdc != null)
+      parts.push("trade $" + cfg.max_paper_trade_usdc);
+    if (cfg.max_paper_position_usdc_per_market != null)
+      parts.push("per-market $" + cfg.max_paper_position_usdc_per_market);
+    if (cfg.max_total_paper_exposure_usdc != null)
+      parts.push("total $" + cfg.max_total_paper_exposure_usdc);
+    if (cfg.min_edge_to_trade != null)
+      parts.push("min edge " + Number(cfg.min_edge_to_trade).toFixed(3));
+    $("paper-config-summary").textContent = parts.length
+      ? "Limits: " + parts.join(" | ")
+      : "";
+  }
+
+  function renderPaperPositions(items) {
+    const tbody = $("paper-positions-table").querySelector("tbody");
+    tbody.innerHTML = "";
+    if (!items || !items.length) {
+      $("paper-positions-empty").hidden = false;
+      return;
+    }
+    $("paper-positions-empty").hidden = true;
+    items.forEach((p) => {
+      const tr = document.createElement("tr");
+      const link = p.url
+        ? `<a href="${p.url}" target="_blank" rel="noopener">${escapeHtml(p.question || p.slug || p.market_id || "")}</a>`
+        : escapeHtml(p.question || p.market_id || "");
+      const markOrExit =
+        p.status === "CLOSED"
+          ? fmtCents(p.exit_price)
+          : fmtCents(p.mark_price);
+      tr.innerHTML = `
+        <td>${escapeHtml(p.status || "")}</td>
+        <td>${link}</td>
+        <td>${escapeHtml(p.side || "")}</td>
+        <td>${fmtCents(p.entry_price)}</td>
+        <td>${markOrExit}</td>
+        <td>${fmtNum(p.shares, 2)}</td>
+        <td>$${fmtNum(p.notional_usdc, 2)}</td>
+        <td class="${pnlClass(p.unrealized_pnl)}">${fmtPnl(p.unrealized_pnl)}</td>
+        <td class="${pnlClass(p.realized_pnl)}">${fmtPnl(p.realized_pnl)}</td>
+        <td>${escapeHtml(p.opened_at || "")}</td>
+        <td>${escapeHtml(p.close_reason || "")}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderPaperTrades(items) {
+    const tbody = $("paper-trades-table").querySelector("tbody");
+    tbody.innerHTML = "";
+    if (!items || !items.length) {
+      $("paper-trades-empty").hidden = false;
+      return;
+    }
+    $("paper-trades-empty").hidden = true;
+    items.forEach((f) => {
+      const tr = document.createElement("tr");
+      const link = f.url
+        ? `<a href="${f.url}" target="_blank" rel="noopener">${escapeHtml(f.question || f.market_id || "")}</a>`
+        : escapeHtml(f.question || f.market_id || "");
+      tr.innerHTML = `
+        <td>${escapeHtml(f.ts || "")}</td>
+        <td>${link}</td>
+        <td>${escapeHtml(f.side || "")}</td>
+        <td>${fmtCents(f.price)}</td>
+        <td>${fmtNum(f.shares, 2)}</td>
+        <td>$${fmtNum(f.notional_usdc, 2)}</td>
+        <td>${escapeHtml(f.reason || "")}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  async function refreshPaper() {
+    setPaperError("");
+    try {
+      const [status, positions, trades] = await Promise.all([
+        apiGet("/paper/status"),
+        apiGet("/paper/positions?status=all"),
+        apiGet("/paper/trades?limit=50"),
+      ]);
+      renderPaperSummary(status);
+      renderPaperPositions((positions && positions.items) || []);
+      renderPaperTrades((trades && trades.items) || []);
+    } catch (e) {
+      if (String(e.message || e) !== "unauthorized") {
+        setPaperError("Paper API error: " + (e.message || e));
+      }
+    }
+  }
+
+  async function resetPaper() {
+    if (!window.confirm(
+      "Reset the paper portfolio? This permanently deletes every " +
+        "simulated position and fill. This cannot be undone.",
+    )) {
+      return;
+    }
+    setPaperError("");
+    try {
+      await apiPost("/paper/reset", {});
+      await refreshPaper();
+    } catch (e) {
+      setPaperError("Paper reset failed: " + (e.message || e));
+    }
   }
 
   async function triggerScan() {
@@ -441,6 +609,8 @@
     $("logout-btn").addEventListener("click", logout);
     $("refresh").addEventListener("click", refresh);
     $("trigger-scan").addEventListener("click", triggerScan);
+    $("paper-refresh").addEventListener("click", refreshPaper);
+    $("paper-reset").addEventListener("click", resetPaper);
     ["filter-liq", "filter-days", "filter-short"].forEach((id) =>
       $(id).addEventListener("input", applyFilters),
     );

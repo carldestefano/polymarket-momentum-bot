@@ -94,3 +94,32 @@ def test_protected_routes_have_jwt_authorizer(template):
 def test_dashboard_url_output_is_https(template):
     outputs = template.find_outputs("DashboardUrl")
     assert outputs, "DashboardUrl output missing"
+
+
+def test_paper_tables_exist(template):
+    """Stage 2 adds PaperPositionsTable and PaperTradesTable."""
+    tables = template.find_resources("AWS::DynamoDB::Table")
+    # Logical IDs are deterministic under the given construct names.
+    names = list(tables.keys())
+    assert any(n.startswith("PaperPositionsTable") for n in names), names
+    assert any(n.startswith("PaperTradesTable") for n in names), names
+
+
+def test_paper_table_outputs_exist(template):
+    for out in ("PaperPositionsTableName", "PaperTradesTableName"):
+        assert template.find_outputs(out), f"missing {out} output"
+
+
+def test_paper_routes_are_registered(template):
+    routes = template.find_resources("AWS::ApiGatewayV2::Route")
+    route_keys = [r["Properties"]["RouteKey"] for r in routes.values()]
+    expected_paths = [
+        "/paper/status",
+        "/paper/positions",
+        "/paper/trades",
+        "/paper/reset",
+    ]
+    for path in expected_paths:
+        assert any(path in rk for rk in route_keys), (
+            f"expected at least one route for {path}, got {route_keys}"
+        )

@@ -30,11 +30,14 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+from polymarket_scanner.paper import run_paper_tick  # noqa: E402
 from polymarket_scanner.scan import run_scan  # noqa: E402
 
 SCANS_TABLE = os.environ.get("SCANS_TABLE")
 OPPORTUNITIES_TABLE = os.environ.get("OPPORTUNITIES_TABLE")
 CONFIG_TABLE = os.environ.get("CONFIG_TABLE")
+PAPER_POSITIONS_TABLE = os.environ.get("PAPER_POSITIONS_TABLE")
+PAPER_TRADES_TABLE = os.environ.get("PAPER_TRADES_TABLE")
 SCANNER_ID = os.environ.get("SCANNER_ID", "default")
 MARKET_LIMIT = int(os.environ.get("MARKET_LIMIT", "500"))
 TOP_N = int(os.environ.get("TOP_N", "50"))
@@ -52,6 +55,19 @@ def _to_decimal(obj: Any) -> Any:
         return {k: _to_decimal(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_to_decimal(v) for v in obj]
+    return obj
+
+
+def _from_decimal(obj: Any) -> Any:
+    """Inverse of _to_decimal for items we read back and feed into paper logic."""
+    if isinstance(obj, decimal.Decimal):
+        if obj == obj.to_integral_value():
+            return int(obj)
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: _from_decimal(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_from_decimal(v) for v in obj]
     return obj
 
 
@@ -119,6 +135,101 @@ def _write_opportunities(result: Dict[str, Any]) -> None:
             )
 
 
+def _load_paper_positions() -> list:
+    if not PAPER_POSITIONS_TABLE:
+        return []
+    try:
+        from boto3.dynamodb.conditions import Key
+
+        resp = _ddb.Table(PAPER_POSITIONS_TABLE).query(
+            KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID),
+            Limit=500,
+        )
+        items = resp.get("Items") or []
+        return [_from_decimal(i) for i in items]
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("paper positions load failed: %s", e)
+        return []
+
+
+def _load_recent_fills(limit: int = 50) -> list:
+    if not PAPER_TRADES_TABLE:
+        return []
+    try:
+        from boto3.dynamodb.conditions import Key
+
+        resp = _ddb.Table(PAPER_TRADES_TABLE).query(
+            KeyConditionExpression=Key("scanner_id").eq(SCANNER_ID),
+            ScanIndexForward=False,  # newest first
+            Limit=max(1, min(limit, 200)),
+        )
+        items = resp.get("Items") or []
+        return [_from_decimal(i) for i in items]
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("paper fills load failed: %s", e)
+        return []
+
+
+def _write_paper_positions(positions: list) -> None:
+    if not PAPER_POSITIONS_TABLE:
+        return
+    table = _ddb.Table(PAPER_POSITIONS_TABLE)
+    # Sort key: OPEN# sorts before CLOSED# so queries return live first.
+    with table.batch_writer(
+        overwrite_by_pkeys=["scanner_id", "position_sk"]
+    ) as bw:
+        for p in positions:
+            status = p.get("status") or "OPEN"
+            opened = p.get("opened_at") or ""
+            market_id = str(p.get("market_id") or "")
+            sk = f"{status}#{opened}#{market_id}"
+            item = {
+                "scanner_id": SCANNER_ID,
+                "position_sk": sk,
+                **p,
+            }
+            bw.put_item(Item=_to_decimal(item))
+
+
+def _write_paper_fills(fills: list) -> None:
+    if not PAPER_TRADES_TABLE or not fills:
+        return
+    table = _ddb.Table(PAPER_TRADES_TABLE)
+    with table.batch_writer(
+        overwrite_by_pkeys=["scanner_id", "trade_sk"]
+    ) as bw:
+        for i, f in enumerate(fills):
+            ts = f.get("ts") or ""
+            market_id = str(f.get("market_id") or "")
+            # Include a per-batch counter so two fills in the same
+            # millisecond don't collide on the sort key.
+            sk = f"{ts}#{i:04d}#{market_id}"
+            item = {
+                "scanner_id": SCANNER_ID,
+                "trade_sk": sk,
+                **f,
+            }
+            bw.put_item(Item=_to_decimal(item))
+
+
+def _write_paper_summary(summary: Dict[str, Any]) -> None:
+    """Pin the latest paper-trading summary onto opportunities meta row."""
+    if not OPPORTUNITIES_TABLE:
+        return
+    try:
+        _ddb.Table(OPPORTUNITIES_TABLE).put_item(
+            Item=_to_decimal(
+                {
+                    "scanner_id": SCANNER_ID,
+                    "sk": "paper#latest",
+                    **summary,
+                }
+            )
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("paper summary write failed: %s", e)
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     started = time.time()
     cfg = _load_config()
@@ -135,12 +246,37 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     _write_scan(result)
     _write_opportunities(result)
 
+    # --- Stage 2: paper trading tick ---------------------------------------
+    # Always run the paper tick so mark-to-market happens on every scan;
+    # the engine itself respects the `paper_trading_enabled` config flag
+    # and skips new opens when disabled.
+    paper_summary: Dict[str, Any] = {}
+    try:
+        prior_positions = _load_paper_positions()
+        recent_fills = _load_recent_fills(limit=50)
+        tick = run_paper_tick(
+            scanned_at=result["scanned_at"],
+            opportunities=result.get("opportunities") or [],
+            positions=prior_positions,
+            recent_fills=recent_fills,
+            config=cfg,
+            now=datetime.now(tz=timezone.utc),
+        )
+        _write_paper_positions(tick["positions"])
+        _write_paper_fills(tick["fills"])
+        paper_summary = tick["summary"]
+        _write_paper_summary(paper_summary)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("paper tick failed: %s", e)
+        paper_summary = {"error": str(e)}
+
     elapsed = time.time() - started
     log.info(
-        "scan ok: total=%s btc=%s top=%s elapsed=%.2fs",
+        "scan ok: total=%s btc=%s top=%s paper_open=%s elapsed=%.2fs",
         result.get("total_markets"),
         result.get("btc_markets"),
         len(result.get("opportunities") or []),
+        paper_summary.get("open_count"),
         elapsed,
     )
     return {
@@ -149,6 +285,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "total_markets": result.get("total_markets"),
         "btc_markets": result.get("btc_markets"),
         "top_n": len(result.get("opportunities") or []),
+        "paper": paper_summary,
         "elapsed_sec": round(elapsed, 3),
     }
 
